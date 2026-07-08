@@ -89,7 +89,7 @@ DeProjPy is modernized compared to the Matlab version, as it can also start from
 | DeProj-style mask | Label image |
 |---|---|
 | `from_heightmap(mask, heightmap, ...)` | `from_labels(labels, heightmap, ...)` |
-| Cell interiors are non-zero; borders are zero. | Each cell has a unique integer label; background is zero. |
+| Cell interiors are non-zero; borders are zero. | All pixels in a cell share a unique integer label; background is zero. |
 
 <p align="center">
   <img src="docs/images/mask_input.png" width="42%">
