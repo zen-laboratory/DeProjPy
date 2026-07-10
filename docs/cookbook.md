@@ -380,7 +380,7 @@ Returned distances are always in physical units.
 Install the companion package:
 
 ```bash
-python -m pip install git+https://github.com/mwappner/labelimage-tools.git
+python -m pip install "labelimage-tools[all]"
 ```
 
 ## 11. Run the example scripts

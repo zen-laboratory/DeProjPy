@@ -61,7 +61,7 @@ def heightmap_from_cell_boundaries(
     """
     if extrapolation not in {"linear", "nearest", "constant", "none"}:
         raise ValueError("extrapolation must be one of 'linear', 'nearest', 'constant', or 'none'")
-    pixel_size = _validate_positive(getattr(result, "pixel_size"), "result.pixel_size")
+    pixel_size = _validate_positive(result.pixel_size, "result.pixel_size")
     boundaries = []
     for cell in getattr(result, "epicells", []):
         boundary = np.asarray(cell.boundary, dtype=float)

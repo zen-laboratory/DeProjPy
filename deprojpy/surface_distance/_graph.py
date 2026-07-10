@@ -18,6 +18,7 @@ from ._helpers import (
     _validate_xy_point,
 )
 
+
 def choose_surface_graph_step(
     shape: tuple[int, ...],
     *,

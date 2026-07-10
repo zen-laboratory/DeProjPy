@@ -7,6 +7,7 @@ from typing import Literal
 import numpy as np
 
 from ..heightmap import prepare_heightmap
+from ..models import DeprojResult
 from ._boundary_surface import heightmap_from_cell_boundaries
 from ._helpers import (
     _as_pixel_xy,
@@ -20,7 +21,6 @@ from ._straight import (
     _selected_surface_straight_distances_numba,
     surface_straight_distance,
 )
-from ..models import DeprojResult
 
 
 @dataclass
@@ -263,7 +263,7 @@ class SurfaceDistanceCalculator:
             height map ready for repeated distance calls.
         """
         if pixel_size is None:
-            pixel_size = getattr(result, "pixel_size")
+            pixel_size = result.pixel_size
         if voxel_depth is None:
             voxel_depth = getattr(result, "voxel_depth", 1.0)
         if units is None:
@@ -341,7 +341,7 @@ class SurfaceDistanceCalculator:
             ``voxel_depth=1.0``, and a prepared raster surface in physical
             z units.
         """
-        pixel_size = _validate_positive(getattr(result, "pixel_size"), "result.pixel_size")
+        pixel_size = _validate_positive(result.pixel_size, "result.pixel_size")
         if units is None:
             units = getattr(result, "units", "a.u.")
         surface = heightmap_from_cell_boundaries(
@@ -385,7 +385,8 @@ class SurfaceDistanceCalculator:
             Sampled z values in physical units.
         """
         points = _as_pixel_xy(xy, pixel_size=self.pixel_size, input_units=input_units)
-        return sample_height_at_xy(self.heightmap, points, order=1, mode="nearest") * self.voxel_depth
+        height = sample_height_at_xy(self.heightmap, points, order=1, mode="nearest")
+        return height * self.voxel_depth
 
     def straight_distance(
         self,

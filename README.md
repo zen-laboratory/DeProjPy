@@ -7,25 +7,27 @@ The goal is not GUI parity with MATLAB. The focus is a scriptable Python API for
 
 ## Installation
 
-Install directly from GitHub:
+Install from PyPI:
 
 ```bash
-python -m pip install git+https://github.com/mwappner/deprojpy.git
+python -m pip install deprojpy
 ```
 
 For development, clone the repository and install it in editable mode:
 
 ```bash
-git clone https://github.com/mwappner/deprojpy.git
-cd deprojpy
+git clone https://github.com/zen-laboratory/DeProjPy.git
+cd DeProjPy
 python -m pip install -e ".[test]"
 python -m pytest
 ```
 
-The label-image workflow requires the companion `labelimage-tools` package:
+The label-image workflow uses the published companion `labelimage-tools`
+package, which is installed automatically with DeProjPy. To install or upgrade
+it explicitly:
 
 ```bash
-python -m pip install git+https://github.com/mwappner/labelimage-tools.git
+python -m pip install "labelimage-tools[all]"
 ```
 
 ## Quick start: DeProj-style mask input
@@ -194,5 +196,4 @@ With the original sample files, expected smoke-check values include:
 
 ## License
 
-This repository is currently intended for internal research use. Add or update a
-license file before external redistribution.
+DeProjPy is distributed under the BSD 3-Clause license. It is a partly Python implementation/port of the core workflow from the original BSD-licensed [MATLAB DeProj project](https://gitlab.pasteur.fr/iah-public/DeProj). This package does not imply endorsement by the original authors or institutions.

@@ -5,7 +5,6 @@ import warnings
 import numpy as np
 from skimage.measure import approximate_polygon
 
-
 # Boundary simplification happens in pixel coordinates so the tolerance is
 # independent of pixel_size. 0.5 px is intentionally conservative.
 BOUNDARY_SIMPLIFICATION_TOLERANCE_PX = 0.5

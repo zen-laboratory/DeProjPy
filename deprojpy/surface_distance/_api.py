@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 import numpy as np
 
+from ..models import DeprojResult
 from ._calculator import SurfaceDistanceCalculator
 from ._graph import SurfaceGraph
 from ._helpers import cell_centers_xy_pixels
-from ..models import DeprojResult
+
 
 def surface_straight_cell_distance(
     result: DeprojResult,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import fields
 from pathlib import Path
 
+import labelimage_tools as lit
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize
@@ -150,14 +151,6 @@ def plot_label_objects(
     cyclic_cmap: bool = False,
 ):
     """Plot a labeled image with optional DeProjPy boundaries and junctions."""
-    try:
-        import labelimage_tools as lit
-    except ImportError as exc:  # pragma: no cover
-        raise ImportError(
-            "plot_label_objects requires labelimage-tools. Install it with: "
-            "python -m pip install -e "
-            "/home/mw/Documents/Pasteur/Code/tissue_processing/labelimage-tools"
-        ) from exc
     fig, ax = lit.plot_label_image(
         labels,
         ax=ax,
@@ -475,10 +468,12 @@ def plot_feature_map(
         fig = _parent_figure(ax)
     normalizer = _normalizer(values, vmin, vmax, norm)
     color_map = plt.colormaps.get_cmap(cmap)
-    for cell, value in zip(result.epicells, values):
+    for cell, value in zip(result.epicells, values, strict=True):
         p = cell.boundary
         color = color_map(normalizer(value)) if np.isfinite(value) else missing_color
-        ax.fill(p[:, 0], p[:, 1],
+        ax.fill(
+            p[:, 0],
+            p[:, 1],
             color=color, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha,
         )
 
@@ -702,9 +697,15 @@ def save_plots(
         ("boundaries_3d.png", lambda ax: plot_3d_boundaries(result, "area")),
     ]
     if labels is not None:
-        plot_specs.insert(0, ("label_objects.png", lambda ax: plot_label_objects(labels, result, ax=ax)))
+        plot_specs.insert(
+            0,
+            ("label_objects.png", lambda ax: plot_label_objects(labels, result, ax=ax)),
+        )
     elif mask is not None:
-        plot_specs.insert(0, ("mask_objects.png", lambda ax: plot_mask_objects(mask, result, ax=ax)))
+        plot_specs.insert(
+            0,
+            ("mask_objects.png", lambda ax: plot_mask_objects(mask, result, ax=ax)),
+        )
     else:
         raise ValueError("save_plots requires either mask=... or labels=...")
     plot_specs.extend(
@@ -717,11 +718,13 @@ def save_plots(
 
     written = []
     for filename, make_plot in plot_specs:
-        _, ax = plt.subplots(figsize=figsize, layout="constrained")
+        placeholder_figure, ax = plt.subplots(figsize=figsize, layout="constrained")
         figure, _ = make_plot(ax)
         path = directory / filename
         figure.savefig(path, dpi=dpi, bbox_inches="tight")
         if close:
             plt.close(figure)
+            if placeholder_figure is not figure:
+                plt.close(placeholder_figure)
         written.append(path)
     return written

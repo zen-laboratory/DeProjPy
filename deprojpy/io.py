@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import labelimage_tools as lit
 import numpy as np
 import tifffile
 
@@ -30,18 +31,6 @@ def load_tiff_pair(
     return mask, heightmap
 
 
-def _lit():
-    try:
-        import labelimage_tools as lit
-    except ImportError as exc:  # pragma: no cover
-        raise ImportError(
-            "load_label_heightmap_pair requires labelimage-tools. Install it with: "
-            "python -m pip install -e "
-            "/home/mw/Documents/Pasteur/Code/tissue_processing/labelimage-tools"
-        ) from exc
-    return lit
-
-
 def load_label_heightmap_pair(
     labels_path: str | Path,
     heightmap_path: str | Path,
@@ -57,7 +46,6 @@ def load_label_heightmap_pair(
     connectivity: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Load a labeled-cell image and matching height map."""
-    lit = _lit()
     heightmap = np.asarray(tifffile.imread(heightmap_path))
     if preprocess_labels:
         labels = lit.load_image_pipeline(

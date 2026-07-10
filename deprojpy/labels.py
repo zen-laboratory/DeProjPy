@@ -1,30 +1,18 @@
 from __future__ import annotations
 
+import labelimage_tools as lit
 import networkx as nx
 import numpy as np
 
 from .objects import MaskObject
 
 
-def _lit():
-    try:
-        import labelimage_tools as lit
-    except ImportError as exc:  # pragma: no cover - exercised when optional dep absent
-        raise ImportError(
-            "from_labels and labels_to_objects require labelimage-tools. "
-            "Install it with: python -m pip install -e "
-            "/home/mw/Documents/Pasteur/Code/tissue_processing/labelimage-tools"
-        ) from exc
-    return lit
-
-
 def validate_labeled_input(labels: np.ndarray) -> np.ndarray:
     """Validate and return a 2-D integer labeled-cell image."""
-    return _lit().validate_label_image(labels)
+    return lit.validate_label_image(labels)
 
 
 def _border_labels(labels: np.ndarray, background: int) -> set[int]:
-    lit = _lit()
     neighbors = lit.adjacency_from_labels(
         labels,
         background=background,
@@ -66,7 +54,6 @@ def labels_to_objects(
     junction_merge_epsilon: float = 0.0,
 ) -> tuple[list[MaskObject], nx.Graph]:
     """Convert a labeled cell image into shared DeProj objects and junction graph."""
-    lit = _lit()
     labels = lit.validate_label_image(labels, background=background)
     contours = lit.ordered_contours_from_labels(labels, background=background)
     _, junctions = lit.junctions_from_labels(

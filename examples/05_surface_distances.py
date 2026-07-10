@@ -101,9 +101,17 @@ def run_surface_distance_example(
         p1_phys,
         input_units="physical",
         return_path=True,
-    ) # type: ignore
-    path_z = boundary_calc.sample_height(path_px, input_units="pixel") if len(path_px) else np.array([])
-    path_xyz = np.column_stack([path_px * result.pixel_size, path_z]) if len(path_px) else np.empty((0, 3))
+    )  # type: ignore
+    path_z = (
+        boundary_calc.sample_height(path_px, input_units="pixel")
+        if len(path_px)
+        else np.array([])
+    )
+    path_xyz = (
+        np.column_stack([path_px * result.pixel_size, path_z])
+        if len(path_px)
+        else np.empty((0, 3))
+    )
 
     subset = centers_px[: min(100, len(centers_px))]
     pairwise = heightmap_calc.straight_pairwise_distances(subset, input_units="pixel")

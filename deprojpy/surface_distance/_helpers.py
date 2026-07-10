@@ -70,6 +70,6 @@ def cell_centers_xy_pixels(result) -> np.ndarray:
     Result cell centers are stored in physical units. This helper divides their
     ``x/y`` components by ``result.pixel_size``.
     """
-    pixel_size = _validate_positive(getattr(result, "pixel_size"), "result.pixel_size")
+    pixel_size = _validate_positive(result.pixel_size, "result.pixel_size")
     centers = np.asarray([cell.center[:2] for cell in result.epicells], dtype=float)
     return centers.reshape(-1, 2) / pixel_size
