@@ -1,6 +1,6 @@
 """DeProj's height-map workflow for Python."""
 
-from .core import from_heightmap, from_labels
+from .core import from_heightmap, from_labels, from_mask
 from .heightmap import compute_curvatures, get_z, prepare_heightmap
 from .io import load_label_heightmap_pair, load_tiff_pair
 from .labels import labels_to_objects
@@ -29,6 +29,7 @@ __all__ = [
     "compute_curvatures",
     "from_heightmap",
     "from_labels",
+    "from_mask",
     "get_z",
     "labels_to_objects",
     "load_label_heightmap_pair",

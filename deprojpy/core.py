@@ -159,7 +159,120 @@ def from_heightmap(
     inpaint_zeros: bool = True,
     prune_zeros: bool = True,
 ) -> DeprojResult:
-    """Deproject binary-ridge segmented cell contours onto a height-map surface."""
+    """Deproject cell contours from a binary mask onto a height-map surface.
+
+    This is the original DeProj-style entry point. It expects a two-dimensional
+    binary segmentation mask and a matching height map. Cell objects, contours,
+    and junctions are extracted from the mask, then projected onto the height map
+    to compute deprojected three-dimensional cell measurements.
+
+    The function name is kept for consistency with the original MATLAB DeProj
+    API. Conceptually, the input segmentation is a binary mask, so
+    :func:`from_mask` is provided as an alias with the same behavior.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Two-dimensional binary or binary-like segmentation mask with the same
+        shape as ``heightmap``. This mask should follow the original DeProj input
+        convention: cell interiors are foreground and cell borders/ridges are
+        background. The mask is parsed into individual cell objects by
+        :func:`deprojpy.mask.mask_to_objects`.
+    heightmap : np.ndarray
+        Two-dimensional height map sampled on the same pixel grid as ``mask``.
+        Height values are converted to physical Z units by multiplication with
+        ``voxel_depth``. The height map may be optionally inverted, inpainted,
+        and pruned according to ``invert_z``, ``inpaint_zeros``, and
+        ``prune_zeros``.
+    pixel_size : float, default: 1.0
+        Physical size of one pixel in the XY plane, expressed in ``units`` per
+        pixel. Boundary coordinates and junction coordinates are multiplied by
+        this value before three-dimensional measurements are computed.
+    voxel_depth : float, default: 1.0
+        Physical size of one height-map unit in the Z direction, expressed in
+        ``units`` per height-map unit. Height values are multiplied by this value
+        during height-map preparation.
+    units : str, default: "pixels"
+        Name of the physical unit associated with ``pixel_size`` and
+        ``voxel_depth``. This string is stored in the returned
+        :class:`DeprojResult` and used for reporting; it does not affect the
+        numerical calculations.
+    invert_z : bool, default: False
+        If True, invert the height map during preprocessing. Use this when the
+        raw height map has the opposite orientation from the desired surface
+        convention.
+    inpaint_zeros : bool, default: True
+        If True, fill zero-valued regions in the height map during preprocessing
+        before geometric measurements are computed.
+    prune_zeros : bool, default: True
+        If True, discard cells and junctions whose sampled height values are
+        zero, NaN, or infinite after preprocessing. If False, non-finite values
+        remaining after preprocessing raise an error.
+
+    Returns
+    -------
+    DeprojResult
+        Result object containing the deprojected cells, the junction graph, the
+        prepared height map, source image shape, unit metadata, and measurement
+        metadata. Cell identifiers are assigned sequentially in this binary-mask
+        pathway.
+
+    Raises
+    ------
+    ValueError
+        If ``mask`` and ``heightmap`` are not two-dimensional arrays with
+        identical shapes; if ``pixel_size`` or ``voxel_depth`` is not positive
+        and finite; if mask parsing finds no retained cells; or if the height map
+        contains invalid values that cannot be handled with the requested
+        preprocessing options.
+
+    Notes
+    -----
+    The XY and Z calibration parameters are multiplicative scale factors. For
+    example, if microscope metadata gives ``xy_scale`` in pixels per micrometre
+    and ``z_scale`` in height-map units per micrometre, then use
+    ``pixel_size = 1 / xy_scale`` and ``voxel_depth = 1 / z_scale``.
+
+    This function differs from :func:`from_labels`, which expects a dense
+    integer label image where each cell has its own label. In the binary-mask
+    pathway, cell identifiers are assigned sequentially after object parsing.
+
+    See Also
+    --------
+    from_mask : Alias of ``from_heightmap`` with a clearer name.
+    from_labels : Deproject cells from a dense integer label image.
+    deprojpy.mask.mask_to_objects : Parse a binary DeProj-style mask into cell
+        objects and a junction graph.
+
+    Examples
+    --------
+    Run DeProjPy on an original DeProj-style binary segmentation mask and a
+    matching height map:
+
+    >>> import tifffile as tiff
+    >>> import deprojpy as dp
+    >>> mask = tiff.imread("segmentation.tif")
+    >>> heightmap = tiff.imread("heightmap.tif")
+    >>> result = dp.from_heightmap(
+    ...     mask,
+    ...     heightmap,
+    ...     pixel_size=0.183,
+    ...     voxel_depth=0.5,
+    ...     units="µm",
+    ... )
+    >>> table = result.to_dataframe()
+    >>> table.head()
+
+    The same call can be written using the clearer alias:
+
+    >>> result = dp.from_mask(
+    ...     mask,
+    ...     heightmap,
+    ...     pixel_size=0.183,
+    ...     voxel_depth=0.5,
+    ...     units="µm",
+    ... )
+    """
     mask, heightmap = _validate_common_inputs(
         mask,
         heightmap,
@@ -182,6 +295,7 @@ def from_heightmap(
         cell_id_policy="sequential",
     )
 
+from_mask = from_heightmap
 
 def from_labels(
     labels: np.ndarray,
@@ -200,7 +314,141 @@ def from_labels(
     junction_connectivity: int = 2,
     junction_merge_epsilon: float = 0.0,
 ) -> DeprojResult:
-    """Deproject labeled-image cell contours onto a height-map surface."""
+    """Deproject labeled-cell contours onto a height-map surface.
+
+    This is the main entry point for running DeProjPy from an integer labeled
+    segmentation image. Each non-background label is interpreted as one cell.
+    Cell contours are extracted from the label image, multi-cell junctions are
+    detected from local label neighborhoods, and the resulting 2-D cell geometry
+    is projected onto the supplied height map to compute deprojected 3-D cell
+    measurements.
+
+    In contrast to :func:`from_heightmap`, which expects a binary ridge/interior
+    segmentation in the style of the original MATLAB DeProj input, this function
+    expects a dense label image where pixels belonging to the same cell share the
+    same integer label. By default, cells touching either the explicit background
+    or the image border are discarded before deprojection, but this behavior can
+    be toggled.
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        Two-dimensional integer label image. Each non-background value identifies
+        one segmented cell. The array must have the same shape as ``heightmap``.
+        Floating-point arrays may be accepted only if they contain finite,
+        integer-like values that can be safely converted to integer labels by
+        the label-image validation routine.
+    heightmap : np.ndarray
+        Two-dimensional height map sampled on the same pixel grid as ``labels``.
+        Height values are converted to physical Z units by multiplication with
+        ``voxel_depth``. The height map may be optionally inverted, inpainted,
+        and pruned according to ``invert_z``, ``inpaint_zeros``, and
+        ``prune_zeros``.
+    pixel_size : float, default: 1.0
+        Physical size of one pixel in the XY plane, expressed in ``units`` per
+        pixel. Boundary coordinates and junction coordinates are multiplied by
+        this value before 3-D measurements are computed.
+    voxel_depth : float, default: 1.0
+        Physical size of one height-map unit in the Z direction, expressed in
+        ``units`` per height-map unit. Height values are multiplied by this
+        value during height-map preparation.
+    units : str, default: "pixels"
+        Name of the physical unit associated with ``pixel_size`` and
+        ``voxel_depth``. This string is stored in the returned
+        :class:`DeprojResult` and used for reporting; it does not affect the
+        numerical calculations.
+    invert_z : bool, default: False
+        If True, invert the height map during preprocessing. Use this when the
+        raw height map has the opposite orientation from the desired surface
+        convention.
+    inpaint_zeros : bool, default: True
+        If True, fill zero-valued regions in the height map during preprocessing
+        before geometric measurements are computed.
+    prune_zeros : bool, default: True
+        If True, discard cells and junctions whose sampled height values are
+        zero, NaN, or infinite after preprocessing. If False, non-finite values
+        remaining after preprocessing raise an error.
+    background : int, default: 0
+        Label value used for background pixels in ``labels``. Background is not
+        treated as a cell.
+    drop_border_cells : bool, default: True
+        If True, discard cells that touch the background or the outer image
+        boundary before deprojection.
+    min_junction_labels : int, default: 3
+        Minimum number of distinct labels that must meet in a local neighborhood
+        for a pixel cluster to be considered a junction. The default detects
+        ordinary multicellular junctions where at least three regions meet.
+    junction_background : int or None, default: None
+        Background value to use during junction detection. If None, background
+        pixels are included according to the junction-detection routine's
+        default behavior. Pass ``background`` to explicitly treat the same value
+        as background during junction detection.
+    junction_connectivity : int, default: 2
+        Connectivity used to cluster junction pixels. This is passed to the
+        underlying label-image junction detection routine. A value of ``2``
+        corresponds to 8-connectivity in two dimensions.
+    junction_merge_epsilon : float, default: 0.0
+        Distance threshold, in pixels, for merging nearby detected junctions.
+        The default disables post-detection merging.
+
+    Returns
+    -------
+    DeprojResult
+        Result object containing the deprojected cells, the junction graph, the
+        prepared height map, source image shape, unit metadata, and measurement
+        metadata. Cell identifiers are derived from the original source labels
+        when using this entry point.
+
+    Raises
+    ------
+    ValueError
+        If ``labels`` and ``heightmap`` are not two-dimensional arrays with
+        identical shapes; if ``pixel_size`` or ``voxel_depth`` is not positive
+        and finite; if the label image cannot be validated as an integer label
+        image; if no cells remain after label parsing and filtering; or if the
+        height map contains invalid values that cannot be handled with the
+        requested preprocessing options.
+
+    Notes
+    -----
+    The XY and Z calibration parameters are multiplicative scale factors. For
+    example, if microscope metadata gives ``xy_scale`` in pixels per micrometre
+    and ``z_scale`` in height-map units per micrometre, then use
+    ``pixel_size = 1 / xy_scale`` and ``voxel_depth = 1 / z_scale``.
+
+    The labeled-image pathway preserves source labels in the returned cells.
+    This differs from the binary-mask pathway, where cell identifiers are
+    assigned sequentially.
+
+    See Also
+    --------
+    from_heightmap : Deproject the original binary-ridge DeProj-style input.
+    labelimage_tools.validate_label_image : Validate integer-like label images.
+    labelimage_tools.ordered_contours_from_labels : Extract ordered contours
+        from labeled images.
+    labelimage_tools.junctions_from_labels : Detect multicellular junctions
+        from labeled images.
+
+    Examples
+    --------
+    Run DeProjPy on a labeled segmentation and a matching height map with
+    physical calibration in micrometres:
+
+    >>> import tifffile as tiff
+    >>> import deprojpy as dp
+    >>> labels = tiff.imread("labels.tif")
+    >>> heightmap = tiff.imread("heightmap.tif")
+    >>> result = dp.from_labels(
+    ...     labels,
+    ...     heightmap,
+    ...     pixel_size=0.183,
+    ...     voxel_depth=0.5,
+    ...     units="µm",
+    ...     background=0,
+    ... )
+    >>> table = result.to_dataframe()
+    >>> table.head()
+    """
     labels, heightmap = _validate_common_inputs(
         labels,
         heightmap,
