@@ -116,7 +116,15 @@ def mask_to_objects(mask: np.ndarray) -> tuple[list[MaskObject], nx.Graph]:
                 graph.add_edge(first, second)
 
         # Store the cell boundary and approximate center for later use.
-        objects.append(MaskObject(boundary, boundary.mean(axis=0), junction_ids))
+        footprint_rc = np.argwhere(component).astype(np.int64, copy=False)
+        objects.append(
+            MaskObject(
+                boundary,
+                boundary.mean(axis=0),
+                junction_ids,
+                footprint_rc=footprint_rc,
+            )
+        )
     if not objects:
         raise ValueError(
             "mask parsing found no retained cells; expected nonzero cell interiors "

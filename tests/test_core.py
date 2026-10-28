@@ -9,6 +9,7 @@ import tifffile
 
 import deprojpy as dp
 import deprojpy.core as core
+from deprojpy.heightmap import surface_centroids
 from deprojpy.models import DATAFRAME_COLUMNS, DeprojResult
 from deprojpy.objects import MaskObject
 from deprojpy.plotting import (
@@ -64,6 +65,7 @@ def test_boundary_simplification_happens_inside_shared_pipeline(monkeypatch):
         boundary=boundary,
         center=boundary.mean(axis=0),
         junction_ids=np.array([], int),
+        footprint_rc=np.array([[row, col] for row in range(4, 8) for col in range(4, 8)]),
     )
     heightmap = np.ones((15, 15), dtype=float)
 
@@ -88,6 +90,56 @@ def test_boundary_simplification_happens_inside_shared_pipeline(monkeypatch):
     )
 
     assert len(simplified.epicells[0].boundary) < len(detailed.epicells[0].boundary)
+    np.testing.assert_allclose(
+        simplified.epicells[0].surface_centroid,
+        detailed.epicells[0].surface_centroid,
+    )
+
+
+def test_surface_centroid_flat_asymmetric_footprint_and_units_axes():
+    heightmap = np.full((5, 6), 7.5)
+    footprint = np.array([[1, 1], [1, 2], [1, 3], [2, 1]])
+    centroid = surface_centroids(heightmap, [footprint], pixel_size=2.0)[0]
+    np.testing.assert_allclose(centroid, [3.5, 2.5, 7.5])
+
+
+def test_surface_centroid_tilted_plane_and_varying_slope_reference():
+    y, x = np.indices((7, 8))
+    footprint = np.array([[2, 2], [2, 3], [3, 2], [4, 2], [4, 3]])
+    plane = 4.0 + 0.3 * (x * 0.5) + 0.7 * (y * 0.5)
+    centroid = surface_centroids(plane, [footprint], pixel_size=0.5)[0]
+    mean_x = footprint[:, 1].mean() * 0.5
+    mean_y = footprint[:, 0].mean() * 0.5
+    np.testing.assert_allclose(centroid, [mean_x, mean_y, 4 + 0.3 * mean_x + 0.7 * mean_y])
+
+    curved = (x * 0.5) ** 3 + 0.2 * (y * 0.5) ** 2
+    hy, hx = np.gradient(curved, 0.5, 0.5)
+    rows, cols = footprint.T
+    weights = np.sqrt(1 + hx[rows, cols] ** 2 + hy[rows, cols] ** 2)
+    expected = np.average(
+        np.c_[cols * 0.5, rows * 0.5, curved[rows, cols]], axis=0, weights=weights
+    )
+    measured = surface_centroids(curved, [footprint], pixel_size=0.5)[0]
+    np.testing.assert_allclose(measured, expected)
+    assert not np.isclose(measured[0], mean_x)
+
+
+def test_surface_centroid_invalid_derivative_support_is_all_nan():
+    heightmap = np.ones((5, 5))
+    heightmap[2, 2] = np.nan
+    footprint = np.array([[2, 1], [2, 2]])
+    assert np.isnan(surface_centroids(heightmap, [footprint])[0]).all()
+
+
+def test_surface_centroid_inversion_preserves_xy_and_reflects_z():
+    y, x = np.indices((6, 7))
+    heightmap = 2.0 + x**2 + 0.5 * y
+    footprint = np.array([[1, 1], [1, 2], [2, 1], [3, 1], [3, 2]])
+    original = surface_centroids(heightmap, [footprint])[0]
+    inverted_map = np.max(heightmap) - heightmap
+    inverted = surface_centroids(inverted_map, [footprint])[0]
+    np.testing.assert_allclose(inverted[:2], original[:2])
+    assert np.isclose(inverted[2], np.max(heightmap) - original[2])
 
 
 def test_boundary_simplification_point_count_is_independent_of_pixel_size():
@@ -147,6 +199,11 @@ def test_dataframe_schema_and_csv_export(tmp_path):
     result = dp.from_heightmap(mask, np.ones(mask.shape), inpaint_zeros=False, prune_zeros=False)
     frame = result.to_dataframe()
     assert frame.columns.tolist() == DATAFRAME_COLUMNS
+    np.testing.assert_allclose(
+        frame.loc[0, ["surface_centroid_x", "surface_centroid_y", "surface_centroid_z"]]
+        .to_numpy(dtype=float),
+        result.epicells[0].surface_centroid,
+    )
     output = tmp_path / "nested" / "measurements.csv"
     output.parent.mkdir()
     result.to_csv(output)

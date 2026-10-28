@@ -55,6 +55,12 @@ def test_from_labels_returns_result_with_source_labels():
     assert frame["id"].tolist() == frame["source_label"].tolist()
     assert np.isfinite(frame["area"]).all()
     assert (frame["area"] > 0).all()
+    assert np.isfinite(
+        frame[["surface_centroid_x", "surface_centroid_y", "surface_centroid_z"]]
+    ).all().all()
+    for cell in result.epicells:
+        rows, cols = np.where(labels == cell.source_label)
+        np.testing.assert_allclose(cell.surface_centroid[:2], [cols.mean(), rows.mean()])
 
 
 def test_from_labels_rejects_heightmap_shape_mismatch():

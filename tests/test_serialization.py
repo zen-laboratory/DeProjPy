@@ -53,6 +53,7 @@ def _manual_result() -> DeprojResult:
             uncorrected_perimeter=6.0,
             area_error=0.2,
             perimeter_error=0.1,
+            surface_centroid=np.array([1.1, 0.6, 1.15]),
         ),
         Epicell(
             id=202,
@@ -98,6 +99,7 @@ def _assert_cells_equal(original: Epicell, loaded: Epicell) -> None:
     assert loaded.source_label == original.source_label
     np.testing.assert_allclose(loaded.boundary, original.boundary)
     np.testing.assert_allclose(loaded.center, original.center)
+    np.testing.assert_allclose(loaded.surface_centroid, original.surface_centroid, equal_nan=True)
     np.testing.assert_array_equal(loaded.junction_ids, original.junction_ids)
     assert loaded.n_neighbors == original.n_neighbors
     assert loaded.area == original.area
@@ -239,6 +241,47 @@ def test_load_rejects_missing_version(tmp_path):
     np.savez(path, **arrays)
 
     with pytest.raises(ValueError, match="missing required.*format_version"):
+        DeprojResult.load(path)
+
+
+def test_epicell_surface_centroid_defaults_are_independent_nan_arrays():
+    result = _manual_result()
+    first, second = result.epicells
+    assert np.isnan(second.surface_centroid).all()
+    second.surface_centroid[0] = 3.0
+    assert first.surface_centroid[0] == 1.1
+
+
+def test_load_legacy_1_0_archive_uses_unavailable_centroids_and_resaves(tmp_path):
+    path = _manual_result().save(tmp_path / "legacy.npz")
+    with np.load(path, allow_pickle=False) as data:
+        arrays = {
+            key: data[key]
+            for key in data.files
+            if key != "cell_surface_centroids"
+        }
+    arrays["format_version"] = np.asarray("1.0")
+    np.savez(path, **arrays)
+
+    loaded = DeprojResult.load(path)
+    assert all(np.isnan(cell.surface_centroid).all() for cell in loaded.epicells)
+    new_path = loaded.save(tmp_path / "resaved.npz")
+    reloaded = DeprojResult.load(new_path)
+    assert all(np.isnan(cell.surface_centroid).all() for cell in reloaded.epicells)
+
+
+def test_load_1_1_requires_and_validates_surface_centroids(tmp_path):
+    path = _manual_result().save(tmp_path / "missing_centroids.npz")
+    with np.load(path, allow_pickle=False) as data:
+        arrays = {key: data[key] for key in data.files if key != "cell_surface_centroids"}
+    np.savez(path, **arrays)
+    with pytest.raises(ValueError, match="cell_surface_centroids"):
+        DeprojResult.load(path)
+
+    path = _manual_result().save(tmp_path / "partial_centroids.npz")
+    centroids = np.array([[1.0, np.nan, 2.0], [np.inf, np.inf, np.inf]])
+    _rewrite_npz(path, cell_surface_centroids=centroids)
+    with pytest.raises(ValueError, match="entirely finite or entirely NaN"):
         DeprojResult.load(path)
 
 

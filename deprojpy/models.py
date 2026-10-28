@@ -7,8 +7,8 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
-SERIALIZATION_FORMAT_VERSION = "1.0"
-SUPPORTED_SERIALIZATION_FORMAT_VERSIONS = frozenset({SERIALIZATION_FORMAT_VERSION})
+SERIALIZATION_FORMAT_VERSION = "1.1"
+SUPPORTED_SERIALIZATION_FORMAT_VERSIONS = frozenset({"1.0", SERIALIZATION_FORMAT_VERSION})
 
 DATAFRAME_COLUMNS = [
     "id",
@@ -16,6 +16,9 @@ DATAFRAME_COLUMNS = [
     "xc",
     "yc",
     "zc",
+    "surface_centroid_x",
+    "surface_centroid_y",
+    "surface_centroid_z",
     "area",
     "perimeter",
     "euler_alpha",
@@ -146,6 +149,20 @@ def _pack_1d_arrays(arrays: list[np.ndarray], *, dtype=np.int64) -> tuple[np.nda
     return packed, offsets
 
 
+def _validated_surface_centroids(epicells: list["Epicell"]) -> np.ndarray:
+    values = np.empty((len(epicells), 3), dtype=float)
+    for index, cell in enumerate(epicells):
+        centroid = np.asarray(cell.surface_centroid, dtype=float)
+        if centroid.shape != (3,):
+            raise ValueError(f"Epicell {index} surface_centroid must have shape (3,)")
+        if not (np.all(np.isfinite(centroid)) or np.all(np.isnan(centroid))):
+            raise ValueError(
+                f"Epicell {index} surface_centroid must be entirely finite or entirely NaN"
+            )
+        values[index] = centroid
+    return values
+
+
 def _serialize_epicells(epicells: list["Epicell"]) -> dict[str, np.ndarray]:
     boundaries, boundary_offsets = _pack_arrays([cell.boundary for cell in epicells], width=3)
     junction_ids, junction_offsets = _pack_1d_arrays(
@@ -168,6 +185,7 @@ def _serialize_epicells(epicells: list["Epicell"]) -> dict[str, np.ndarray]:
         "cell_boundary_points": boundaries,
         "cell_boundary_offsets": boundary_offsets,
         "cell_centers": np.asarray([cell.center for cell in epicells], dtype=float).reshape(-1, 3),
+        "cell_surface_centroids": _validated_surface_centroids(epicells),
         "cell_junction_ids": junction_ids,
         "cell_junction_offsets": junction_offsets,
         "cell_n_neighbors": np.asarray([cell.n_neighbors for cell in epicells], dtype=np.int64),
@@ -206,7 +224,9 @@ def _serialize_epicells(epicells: list["Epicell"]) -> dict[str, np.ndarray]:
     }
 
 
-def _deserialize_epicells(data: np.lib.npyio.NpzFile) -> list["Epicell"]:
+def _deserialize_epicells(
+    data: np.lib.npyio.NpzFile, *, format_version: str
+) -> list["Epicell"]:
     count_array = np.asarray(data["cell_count"])
     if count_array.ndim != 0:
         raise ValueError("cell_count must be a scalar")
@@ -243,6 +263,16 @@ def _deserialize_epicells(data: np.lib.npyio.NpzFile) -> list["Epicell"]:
         raise ValueError("cell_n_neighbors must match each cell's serialized junction id count")
 
     centers = _as_2d_float(data, "cell_centers", (count, 3))
+    if format_version == "1.0":
+        surface_centroids = np.full((count, 3), np.nan, dtype=float)
+    else:
+        surface_centroids = _as_2d_float(data, "cell_surface_centroids", (count, 3))
+        finite_rows = np.all(np.isfinite(surface_centroids), axis=1)
+        unavailable_rows = np.all(np.isnan(surface_centroids), axis=1)
+        if not np.all(finite_rows | unavailable_rows):
+            raise ValueError(
+                "cell_surface_centroids rows must be entirely finite or entirely NaN"
+            )
     euler_angles = _as_2d_float(data, "cell_euler_angles", (count, 3))
     curvatures = _as_2d_float(data, "cell_curvatures", (count, 4))
     ellipse_fit = _as_2d_float(data, "cell_ellipse_fit", (count, 6))
@@ -278,6 +308,7 @@ def _deserialize_epicells(data: np.lib.npyio.NpzFile) -> list["Epicell"]:
                 uncorrected_perimeter=float(uncorrected_perimeter[index]),
                 area_error=float(area_error[index]),
                 perimeter_error=float(perimeter_error[index]),
+                surface_centroid=surface_centroids[index],
             )
         )
     return epicells
@@ -397,10 +428,12 @@ def _serialize_prepared_heightmap(heightmap: np.ndarray | None) -> dict[str, np.
 class Epicell:
     """Measurements and geometry for one deprojected epithelial cell.
 
-    ``boundary`` has shape ``(n, 3)`` and ``center`` has shape ``(3,)`` in
-    geometric ``(x, y, z)`` order. Coordinates, lengths, and areas use the
-    parent result's physical units, except angles (radians), eccentricity, and
-    neighbor counts.
+    ``boundary`` has shape ``(n, 3)`` and both centers have shape ``(3,)`` in
+    geometric ``(x, y, z)`` order. ``center`` averages simplified boundary
+    vertices; ``surface_centroid`` weights footprint pixels by reconstructed
+    surface area and can lie off the surface. Coordinates, lengths, and areas
+    use the parent result's physical units, except angles (radians),
+    eccentricity, and neighbor counts.
     """
 
     id: int
@@ -420,6 +453,9 @@ class Epicell:
     uncorrected_perimeter: float
     area_error: float
     perimeter_error: float
+    surface_centroid: np.ndarray = field(
+        default_factory=lambda: np.full(3, np.nan, dtype=float)
+    )
 
 
 @dataclass
@@ -460,6 +496,9 @@ class DeprojResult:
                     "xc": cell.center[0],
                     "yc": cell.center[1],
                     "zc": cell.center[2],
+                    "surface_centroid_x": cell.surface_centroid[0],
+                    "surface_centroid_y": cell.surface_centroid[1],
+                    "surface_centroid_z": cell.surface_centroid[2],
                     "area": cell.area,
                     "perimeter": cell.perimeter,
                     "euler_alpha": cell.euler_angles[0],
@@ -578,7 +617,7 @@ class DeprojResult:
             "junction_edge_targets",
         }
         with np.load(path, allow_pickle=False) as data:
-            _require_keys(data, required)
+            _require_keys(data, {"format_version"})
             version = _as_scalar_string(data, "format_version")
             if version not in SUPPORTED_SERIALIZATION_FORMAT_VERSIONS:
                 supported = ", ".join(sorted(SUPPORTED_SERIALIZATION_FORMAT_VERSIONS))
@@ -586,6 +625,9 @@ class DeprojResult:
                     f"unsupported DeprojResult serialization format version {version!r}; "
                     f"supported versions: {supported}"
                 )
+            if version == "1.1":
+                required.add("cell_surface_centroids")
+            _require_keys(data, required)
             coordinate_order = _as_scalar_string(data, "coordinate_order")
             if coordinate_order != "cell_xyz_graph_xyz_image_yx":
                 raise ValueError("coordinate_order must be 'cell_xyz_graph_xyz_image_yx'")
@@ -608,7 +650,7 @@ class DeprojResult:
                 if source_shape != (0, 0) and prepared_heightmap.shape != source_shape:
                     raise ValueError("prepared_heightmap shape must match source_shape")
 
-            epicells = _deserialize_epicells(data)
+            epicells = _deserialize_epicells(data, format_version=version)
             graph = _deserialize_junction_graph(data)
 
         return cls._from_serialized_components(

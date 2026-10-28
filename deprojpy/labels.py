@@ -74,6 +74,17 @@ def labels_to_objects(
         )
 
     skipped = _border_labels(labels, background) if drop_border_cells else set()
+    foreground_rc = np.argwhere(labels != background)
+    foreground_labels = labels[foreground_rc[:, 0], foreground_rc[:, 1]]
+    order = np.argsort(foreground_labels, kind="stable")
+    sorted_labels = foreground_labels[order]
+    sorted_rc = foreground_rc[order].astype(np.int64, copy=False)
+    unique_labels, starts = np.unique(sorted_labels, return_index=True)
+    grouped_rc = np.split(sorted_rc, starts[1:]) if len(unique_labels) else []
+    footprints = {
+        int(label): coords
+        for label, coords in zip(unique_labels, grouped_rc, strict=True)
+    }
     objects: list[MaskObject] = []
     for label, contour_yx in contours.items():
         label = int(label)
@@ -94,6 +105,7 @@ def labels_to_objects(
                 center=boundary_xy.mean(axis=0),
                 junction_ids=junction_ids,
                 source_label=label,
+                footprint_rc=footprints[label],
             )
         )
     if not objects:

@@ -46,7 +46,8 @@ df = result.to_dataframe()
 result.to_csv("measurements.csv")
 ```
 
-Returned boundaries, centers, and junction centroids use geometric `(x, y, z)` order in physical units. Input images still use normal image indexing `(row, column)`.
+Returned boundaries, centers, and junction centroids use geometric `(x, y, z)` order in physical units. Input images still use normal image indexing `(row, column)`. `cell.center` (and dataframe columns `xc`, `yc`, `zc`) is the mean of the simplified boundary vertices. `cell.surface_centroid` (columns `surface_centroid_x`, `surface_centroid_y`, `surface_centroid_z`) instead weights the cell interior by reconstructed surface area. It can lie off the height-map surface, so its Z value is not replaced by the height sampled at its XY position.
+
 
 Plot a scalar feature on the deprojected cell polygons:
 
@@ -128,7 +129,9 @@ For plotting paths on the fitted DeProj cell-contour surface, build the calculat
 import numpy as np
 from deprojpy.surface_distance import SurfaceDistanceCalculator, SurfaceGraph
 
-centers = df[["center_x", "center_y"]].to_numpy()
+centers = df[["xc", "yc"]].to_numpy()
+# To use area-weighted surface centroids explicitly instead:
+surface_centers = df[["surface_centroid_x", "surface_centroid_y"]].to_numpy()
 
 calc = SurfaceDistanceCalculator.from_cell_boundaries(result)
 d_straight = calc.straight_distance(centers[10], centers[200], input_units="physical")

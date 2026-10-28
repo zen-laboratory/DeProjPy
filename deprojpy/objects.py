@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -18,3 +18,6 @@ class MaskObject:
     center: np.ndarray
     junction_ids: np.ndarray
     source_label: int | None = None
+    footprint_rc: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 2), dtype=np.int64)
+    )

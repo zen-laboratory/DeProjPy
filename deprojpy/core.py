@@ -12,7 +12,7 @@ from .geometry import (
     polygon_metrics,
     simplify_boundary_pixels,
 )
-from .heightmap import compute_curvatures, get_z, prepare_heightmap
+from .heightmap import compute_curvatures, get_z, prepare_heightmap, surface_centroids
 from .labels import labels_to_objects
 from .mask import mask_to_objects
 from .models import DeprojResult, Epicell
@@ -82,14 +82,25 @@ def _from_objects_and_graph(
         xy = np.asarray(data["centroid"], dtype=float) * pixel_size
         z = get_z(xy[None, :], prepared, pixel_size)[0]
         data["centroid"] = np.array([xy[0], xy[1], z])
-        if prune_zeros and (not np.isfinite(z) or z == 0):
+        if prune_zeros and not np.isfinite(z):
             bad_junctions.add(int(node_id))
 
     curvatures = compute_curvatures(prepared, smooth_scale, pixel_size)
+    centroids = surface_centroids(
+        prepared, [obj.footprint_rc for obj in objects], pixel_size
+    )
     cells: list[Epicell] = []
-    for obj in objects:
+    for obj, surface_centroid in zip(objects, centroids, strict=True):
         if bad_junctions.intersection(map(int, obj.junction_ids)):
             continue
+        if not np.all(np.isfinite(surface_centroid)):
+            if prune_zeros:
+                continue
+            label = f" source label {obj.source_label}" if obj.source_label is not None else ""
+            raise ValueError(
+                f"cell{label} footprint lacks finite height or finite-difference "
+                "support for its surface centroid"
+            )
 
         # Simplify in pixel coordinates before height-map sampling or physical
         # scaling. This keeps the tolerance independent of pixel_size and avoids
@@ -100,7 +111,7 @@ def _from_objects_and_graph(
         )
         xy = boundary_px * pixel_size
         z = get_z(xy, prepared, pixel_size)
-        if prune_zeros and (not np.all(np.isfinite(z)) or np.any(z == 0)):
+        if prune_zeros and not np.all(np.isfinite(z)):
             continue
         boundary = np.c_[xy, z]
         area, perimeter, area2d, perimeter2d = polygon_metrics(boundary)
@@ -135,6 +146,7 @@ def _from_objects_and_graph(
                 uncorrected_perimeter=perimeter2d,
                 area_error=area - area2d,
                 perimeter_error=perimeter - perimeter2d,
+                surface_centroid=surface_centroid,
             )
         )
     graph.remove_nodes_from(bad_junctions)
@@ -236,6 +248,8 @@ def from_heightmap(
     This function differs from :func:`from_labels`, which expects a dense
     integer label image where each cell has its own label. In the binary-mask
     pathway, cell identifiers are assigned sequentially after object parsing.
+    Surface centroids use the dilated component already used for boundary
+    tracing; neighboring cells can therefore share ridge pixels.
 
     See Also
     --------
@@ -418,7 +432,8 @@ def from_labels(
 
     The labeled-image pathway preserves source labels in the returned cells.
     This differs from the binary-mask pathway, where cell identifiers are
-    assigned sequentially.
+    assigned sequentially. Surface centroids use pixels belonging to each
+    original source label.
 
     See Also
     --------

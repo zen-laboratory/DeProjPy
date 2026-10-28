@@ -89,11 +89,13 @@ df = result.to_dataframe()
 result.to_csv("measurements.csv")
 ```
 
-The result uses geometric coordinates in physical units. For example,
-`cell.center` is `(x, y, z)`, not `(row, column, z)`.
+The result uses geometric coordinates in physical units. `cell.center` is the mean of simplified boundary vertices in `(x, y, z)` order. The independently computed `cell.surface_centroid` weights all footprint pixels by reconstructed surface area and can lie off the surface. Label inputs use the original label pixels; binary masks use the dilated boundary-tracing component, so neighboring footprints may share ridge pixels. 
 
 ```python
-centers_xyz = df[["center_x", "center_y", "center_z"]].to_numpy()
+centers_xyz = df[["xc", "yc", "zc"]].to_numpy()
+surface_centers_xyz = df[
+    ["surface_centroid_x", "surface_centroid_y", "surface_centroid_z"]
+].to_numpy()
 ```
 
 ## 4. Plot basic diagnostics
@@ -236,6 +238,10 @@ boundary_calc = SurfaceDistanceCalculator.from_cell_boundaries(result,
 import numpy as np
 
 centers_phys = np.asarray([cell.center[:2] for cell in result.epicells])
+# Opt in to the area-weighted locations by supplying their XY coordinates:
+surface_centers_phys = np.asarray(
+    [cell.surface_centroid[:2] for cell in result.epicells]
+)
 i, j = 10, 200
 
 d_straight = boundary_calc.straight_distance(

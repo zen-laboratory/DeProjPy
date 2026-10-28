@@ -72,6 +72,57 @@ def get_z(points_xy: np.ndarray, heightmap: np.ndarray, pixel_size: float) -> np
     return np.asarray(heightmap[y, x], dtype=float)
 
 
+def surface_centroids(
+    heightmap: np.ndarray,
+    footprints_rc: list[np.ndarray],
+    pixel_size: float = 1.0,
+) -> np.ndarray:
+    """Return area-weighted surface centroids for pixel footprints.
+
+    ``heightmap`` must already be prepared and expressed in physical Z units.
+    Footprints contain integer ``(row, column)`` pixel indices. Derivatives are
+    calculated once in physical XY units with NumPy's central differences in
+    the interior and one-sided differences at image boundaries. A footprint is
+    unavailable (an all-NaN triple) if any of its heights or derivative samples
+    is non-finite; invalid samples are never silently omitted.
+    """
+    h = np.asarray(heightmap, dtype=float)
+    if h.ndim != 2:
+        raise ValueError(f"heightmap must be a 2-D array; received shape {h.shape}")
+    if min(h.shape) < 2:
+        raise ValueError("heightmap must have at least two rows and two columns")
+    if not np.isfinite(pixel_size) or pixel_size <= 0:
+        raise ValueError("pixel_size must be a positive finite number")
+
+    hy, hx = np.gradient(h, pixel_size, pixel_size, edge_order=1)
+    weights = np.sqrt(1.0 + hx * hx + hy * hy)
+    result = np.full((len(footprints_rc), 3), np.nan, dtype=float)
+    for index, footprint in enumerate(footprints_rc):
+        rc = np.asarray(footprint, dtype=np.int64)
+        if rc.ndim != 2 or rc.shape[1] != 2 or len(rc) == 0:
+            continue
+        rows, cols = rc[:, 0], rc[:, 1]
+        if (
+            np.any(rows < 0)
+            or np.any(rows >= h.shape[0])
+            or np.any(cols < 0)
+            or np.any(cols >= h.shape[1])
+        ):
+            continue
+        z = h[rows, cols]
+        w = weights[rows, cols]
+        if not np.all(np.isfinite(z)) or not np.all(np.isfinite(w)):
+            continue
+        total = np.sum(w)
+        result[index] = (
+            np.array(
+                [np.sum(w * cols * pixel_size), np.sum(w * rows * pixel_size), np.sum(w * z)]
+            )
+            / total
+        )
+    return result
+
+
 def compute_curvatures(
     heightmap: np.ndarray,
     object_scale: float | None = None,
