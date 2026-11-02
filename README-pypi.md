@@ -112,6 +112,26 @@ df = result.to_dataframe()
 
 The label workflow returns the same kind of `DeprojResult` as the mask workflow. Original label IDs are preserved as `source_label` when available.
 
+## Surface-normal intensities
+
+`deprojpy.intensity` measures calibrated `(z, y, x)` fluorescence stacks in
+fitted cell prisms. Region geometry is reusable across explicitly named aligned
+channels, and measurements retain stable cell IDs, clipping status, contributing
+volume, and provenance.
+
+```python
+regions = dp.intensity.prepare_regions(
+    result, (-1, 5), depth_units="slices", tissue_side="increasing_z"
+)
+measured = dp.intensity.measure(
+    {"membrane": membrane_zyx, "cytosol": cytosol_zyx}, regions
+)
+```
+
+See the repository intensity guide and `examples/06_surface_normal_intensity.py`
+for calibration overrides, signed physical depths, weighted mode, persistence,
+prism previews, and feature maps.
+
 ## Surface distances
 
 DeProjPy introduces new reusable tools for distances constrained to a surface.

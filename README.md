@@ -1,5 +1,9 @@
 # DeProjPy
 
+Surface-normal fluorescence measurements are available through
+`deprojpy.intensity`; see [docs/intensity.md](docs/intensity.md) for calibration,
+clipping, weighted-statistic, and notebook usage details.
+
 `deprojpy` is a Python implementation of the core [matlab project DeProj](https://gitlab.pasteur.fr/iah-public/DeProj) workflow: deproject segmented epithelial cell contours onto a height-map surface, compute 3D cell geometry, and estimate distances on the deprojected surface.
 
 
@@ -111,6 +115,32 @@ df = result.to_dataframe()
 ```
 
 The label workflow returns the same kind of `DeprojResult` as the mask workflow. Original label IDs are preserved as `source_label` when available.
+
+## Surface-normal intensities
+
+Measure an explicitly calibrated `(z, y, x)` fluorescence stack in fitted cell
+prisms without changing `Epicell` objects:
+
+```python
+calibration = dp.intensity.StackCalibration((dz, dy, dx))
+regions = dp.intensity.prepare_regions(
+    result,
+    depth_range=(-1.0, 5.0),
+    depth_units="slices",
+    tissue_side="increasing_z",
+    calibration=calibration,
+)
+measured = dp.intensity.measure(
+    {"membrane": membrane_zyx, "cytosol": cytosol_zyx},
+    regions,
+    measurements=("mean", "median", "mode", "sampled_volume"),
+)
+```
+
+Positive depth follows the required tissue side in the original acquisition
+stack. Measurements are volume-weighted estimates of an interpolated physical
+region, not original-voxel histograms. See [the intensity guide](docs/intensity.md)
+and [`examples/06_surface_normal_intensity.py`](examples/06_surface_normal_intensity.py).
 
 ## Surface distances
 

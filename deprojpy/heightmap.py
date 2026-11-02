@@ -26,6 +26,35 @@ def prepare_heightmap(
     zeros become NaN when pruning is enabled. Inversion happens before unit
     scaling, as in the MATLAB workflow.
     """
+    prepared, _ = _prepare_heightmap_with_metadata(
+        heightmap,
+        voxel_depth=voxel_depth,
+        smooth_scale=smooth_scale,
+        invert_z=invert_z,
+        inpaint_zeros=inpaint_zeros,
+        prune_zeros=prune_zeros,
+    )
+    return prepared
+
+
+def _prepare_heightmap_with_metadata(
+    heightmap: np.ndarray,
+    *,
+    voxel_depth: float,
+    smooth_scale: float,
+    invert_z: bool,
+    inpaint_zeros: bool,
+    prune_zeros: bool,
+) -> tuple[np.ndarray, float]:
+    """Prepare one heightmap and return its original-to-geometric Z offset.
+
+    This private form keeps :func:`prepare_heightmap` backward compatible while
+    exposing the exact reflection translation to the deprojection pipeline.
+    Inpainting and smoothing occur only once. For an inverted map, the returned
+    physical offset satisfies ``original_z = offset - geometric_z`` using the
+    same post-inpainting, post-smoothing maximum that performed the reflection.
+    Non-inverted maps return an offset of zero.
+    """
     h = np.asarray(heightmap, dtype=float).copy()
     if h.ndim != 2:
         raise ValueError(f"heightmap must be a 2-D array; received shape {h.shape}")
@@ -49,17 +78,20 @@ def prepare_heightmap(
         h[h == 0] = np.nan
     if smooth_scale > 0:
         h = _nan_gaussian(h, smooth_scale)
+    reflection_offset = 0.0
     if invert_z:
         finite = h[np.isfinite(h)]
         if finite.size:
-            h = finite.max() - h
+            reflection_max = float(finite.max())
+            h = reflection_max - h
+            reflection_offset = reflection_max * float(voxel_depth)
     h *= float(voxel_depth)
     if not np.any(np.isfinite(h)):
         raise ValueError(
             "heightmap contains no finite values after preprocessing; check zero "
             "handling and the input image"
         )
-    return h
+    return h, reflection_offset
 
 
 def get_z(points_xy: np.ndarray, heightmap: np.ndarray, pixel_size: float) -> np.ndarray:

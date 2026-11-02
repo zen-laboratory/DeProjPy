@@ -152,12 +152,40 @@ def test_result_save_load_round_trip_preserves_global_cells_graph_and_dataframe(
     assert loaded.pixel_size == result.pixel_size
     assert loaded.voxel_depth == result.voxel_depth
     assert loaded.source_shape == result.source_shape
+    assert loaded.z_reflected is None
+    assert loaded.z_reflection_offset is None
     np.testing.assert_allclose(loaded.prepared_heightmap, result.prepared_heightmap)
     assert len(loaded.epicells) == len(result.epicells)
     for original_cell, loaded_cell in zip(result.epicells, loaded.epicells, strict=True):
         _assert_cells_equal(original_cell, loaded_cell)
     _assert_graph_equal(result.junction_graph, loaded.junction_graph)
     pd.testing.assert_frame_equal(result.to_dataframe(), loaded.to_dataframe())
+
+
+def test_original_stack_z_mapping_round_trip(tmp_path):
+    result = _manual_result()
+    result.z_reflected = True
+    result.z_reflection_offset = 17.25
+
+    loaded = DeprojResult.load(result.save(tmp_path / "z-mapping.npz"))
+
+    assert loaded.z_reflected is True
+    assert loaded.z_reflection_offset == 17.25
+
+
+def test_original_stack_z_mapping_fields_are_validated(tmp_path):
+    result = _manual_result()
+    result.z_reflected = True
+    result.z_reflection_offset = 5.0
+    path = result.save(tmp_path / "invalid-z-mapping.npz")
+
+    _rewrite_npz(path, z_mapping_known=np.asarray([True]))
+    with pytest.raises(ValueError, match="scalar boolean"):
+        DeprojResult.load(path)
+
+    result.z_reflection_offset = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        result.save(tmp_path / "nonfinite-z-mapping.npz")
 
 
 def test_ragged_boundaries_and_junction_ids_round_trip_exactly(tmp_path):
@@ -265,6 +293,8 @@ def test_load_legacy_1_0_archive_uses_unavailable_centroids_and_resaves(tmp_path
 
     loaded = DeprojResult.load(path)
     assert all(np.isnan(cell.surface_centroid).all() for cell in loaded.epicells)
+    assert loaded.z_reflected is None
+    assert loaded.z_reflection_offset is None
     new_path = loaded.save(tmp_path / "resaved.npz")
     reloaded = DeprojResult.load(new_path)
     assert all(np.isnan(cell.surface_centroid).all() for cell in reloaded.epicells)

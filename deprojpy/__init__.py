@@ -1,12 +1,13 @@
 """DeProj's height-map workflow for Python."""
 
+from . import intensity
 from .core import from_heightmap, from_labels, from_mask
 from .heightmap import compute_curvatures, get_z, prepare_heightmap
 from .io import load_label_heightmap_pair, load_tiff_pair
 from .labels import labels_to_objects
 from .mask import mask_to_objects
 from .models import DeprojResult, Epicell
-from .plotting import save_plots
+from .plotting import plot_values_as_feature_map, save_plots
 from .surface_distance import (
     SurfaceDistanceCalculator,
     SurfaceGraph,
@@ -22,6 +23,7 @@ from .surface_distance import (
 __all__ = [
     "DeprojResult",
     "Epicell",
+    "intensity",
     "SurfaceDistanceCalculator",
     "SurfaceGraph",
     "build_surface_graph",
@@ -36,6 +38,7 @@ __all__ = [
     "load_tiff_pair",
     "mask_to_objects",
     "prepare_heightmap",
+    "plot_values_as_feature_map",
     "heightmap_from_cell_boundaries",
     "sample_height_at_xy",
     "save_plots",

@@ -337,7 +337,63 @@ Then plot the mismatch on one of the geometries:
   <img src="images/label vs mask area mismatch - rel.png" width="100%">
 </p>
 
-## 10. Troubleshooting
+## 10. Measure surface-normal intensities
+
+Prepare cell prisms once, then reuse them for explicitly named aligned channels.
+Stack axes are always `(z, y, x)`; geometry remains physical `(x, y, z)`.
+
+```python
+calibration = dp.intensity.StackCalibration(
+    spacing_zyx=(0.5, PIXEL_SIZE, PIXEL_SIZE),
+    origin_zyx=(0.0, 0.0, 0.0),
+)
+regions = dp.intensity.prepare_regions(
+    result,
+    depth_range=(-1.0, 5.0),
+    depth_units="slices",
+    tissue_side="increasing_z",
+    calibration=calibration,
+)
+measurements = dp.intensity.measure(
+    {"membrane": membrane_zyx, "cytosol": cytosol_zyx},
+    regions,
+    measurements=("mean", "median", "mode", "sampled_volume"),
+    mode_bins="auto",
+)
+```
+
+For a cropped stack, `origin_zyx` is the original physical `(z, y, x)`
+coordinate represented by its index `(0, 0, 0)`. Slice depths are axial-spacing
+equivalents measured along the cell normal. Physical intervals are also valid:
+
+```python
+physical_regions = dp.intensity.prepare_regions(
+    result,
+    depth_range=(-0.5, 3.0),
+    depth_units="um",
+    tissue_side="increasing_z",
+    calibration=calibration,
+)
+```
+
+Inspect the actual prisms and plot an ID-aligned measurement without mutating
+cell objects:
+
+```python
+fig, ax = dp.intensity.plot_region_preview(result, regions, cell_ids=[cell_id])
+fig, ax = dp.intensity.plot_feature_map(
+    result, measurements, channel="cytosol", feature="mean"
+)
+measurements.save("intensity-measurements.npz")
+loaded = dp.intensity.MeasurementResult.load("intensity-measurements.npz")
+```
+
+`requested_volume`, `sampled_volume`, `finite_volume`, `coverage_fraction`,
+`clipped`, `status`, and `reason` distinguish geometry, stack coverage, and
+nonfinite intensity omissions. Interpolation estimates a physical region;
+finer numerical sampling does not increase optical resolution.
+
+## 11. Troubleshooting
 
 ### The z-axis looks inverted
 
@@ -389,7 +445,7 @@ Install the companion package:
 python -m pip install "labelimage-tools[all]"
 ```
 
-## 11. Run the example scripts
+## 12. Run the example scripts
 
 From the repository root:
 
@@ -399,6 +455,7 @@ python examples/02_plot_gallery.py
 python examples/03_run_labeled_sample.py
 python examples/04_label_plots.py
 python examples/05_surface_distances.py
+python examples/06_surface_normal_intensity.py
 ```
 
 Generated plots are written under:

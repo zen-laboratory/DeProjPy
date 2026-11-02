@@ -488,7 +488,7 @@ def plot_feature_map(
     return fig, ax
 
 
-def _plot_values_as_feature_map(
+def plot_values_as_feature_map(
     result: DeprojResult,
     values: np.ndarray,
     *,
@@ -505,6 +505,18 @@ def _plot_values_as_feature_map(
     alpha: float = 1,
     missing_color="0.7",
 ):
+    """Color result cell polygons from one explicitly aligned value per cell.
+
+    ``values`` must be a one-dimensional sequence in ``result.epicells`` order.
+    This public helper supports external measurement tables without mutating
+    :class:`Epicell` or inventing temporary morphology attributes.
+    """
+    values = np.asarray(values, dtype=float)
+    if values.shape != (len(result.epicells),):
+        raise ValueError(
+            "values must have shape "
+            f"({len(result.epicells)},), received {values.shape}"
+        )
     if ax is None:
         fig, ax = plt.subplots(layout="constrained")
     else:
@@ -532,6 +544,10 @@ def _plot_values_as_feature_map(
         scalar_map = plt.cm.ScalarMappable(norm=normalizer, cmap=color_map)
         fig.colorbar(scalar_map, ax=ax, label=colorbar_label)
     return fig, ax
+
+
+# Private compatibility alias for callers predating the public entry point.
+_plot_values_as_feature_map = plot_values_as_feature_map
 
 
 def plot_relative_error_map(

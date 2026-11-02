@@ -12,7 +12,12 @@ from .geometry import (
     polygon_metrics,
     simplify_boundary_pixels,
 )
-from .heightmap import compute_curvatures, get_z, prepare_heightmap, surface_centroids
+from .heightmap import (
+    _prepare_heightmap_with_metadata,
+    compute_curvatures,
+    get_z,
+    surface_centroids,
+)
 from .labels import labels_to_objects
 from .mask import mask_to_objects
 from .models import DeprojResult, Epicell
@@ -67,8 +72,13 @@ def _from_objects_and_graph(
         [polygon_metrics(np.c_[obj.boundary, np.zeros(len(obj.boundary))])[2] for obj in objects]
     )
     smooth_scale = 2.0 * np.sqrt(median_area) / np.pi
-    prepared = prepare_heightmap(
-        heightmap, voxel_depth, smooth_scale, invert_z, inpaint_zeros, prune_zeros
+    prepared, z_reflection_offset = _prepare_heightmap_with_metadata(
+        heightmap,
+        voxel_depth=voxel_depth,
+        smooth_scale=smooth_scale,
+        invert_z=invert_z,
+        inpaint_zeros=inpaint_zeros,
+        prune_zeros=prune_zeros,
     )
     if not prune_zeros and not np.all(np.isfinite(prepared)):
         raise ValueError(
@@ -158,6 +168,8 @@ def _from_objects_and_graph(
         voxel_depth=voxel_depth,
         source_shape=source_shape,
         prepared_heightmap=prepared,
+        z_reflected=bool(invert_z),
+        z_reflection_offset=z_reflection_offset,
     )
 
 

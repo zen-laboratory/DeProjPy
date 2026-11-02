@@ -7,8 +7,8 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
-SERIALIZATION_FORMAT_VERSION = "1.1"
-SUPPORTED_SERIALIZATION_FORMAT_VERSIONS = frozenset({"1.0", SERIALIZATION_FORMAT_VERSION})
+SERIALIZATION_FORMAT_VERSION = "1.2"
+SUPPORTED_SERIALIZATION_FORMAT_VERSIONS = frozenset({"1.0", "1.1", SERIALIZATION_FORMAT_VERSION})
 
 DATAFRAME_COLUMNS = [
     "id",
@@ -72,6 +72,52 @@ def _as_scalar_float(data: np.lib.npyio.NpzFile, key: str) -> float:
     if not np.isfinite(scalar) or scalar <= 0:
         raise ValueError(f"{key} must be positive and finite")
     return scalar
+
+
+def _serialize_z_mapping(
+    z_reflected: bool | None,
+    z_reflection_offset: float | None,
+) -> dict[str, np.ndarray]:
+    """Validate and serialize the geometric-Z to original-stack-Z mapping."""
+    if z_reflected is None:
+        if z_reflection_offset is not None:
+            raise ValueError("z_reflection_offset requires a known z_reflected value")
+        return {
+            "z_mapping_known": np.asarray(False),
+            "z_reflected": np.asarray(False),
+            "z_reflection_offset": np.asarray(np.nan),
+        }
+    if not isinstance(z_reflected, (bool, np.bool_)):
+        raise TypeError("z_reflected must be a boolean or None")
+    if z_reflection_offset is None or not np.isfinite(z_reflection_offset):
+        raise ValueError("a known Z mapping requires a finite z_reflection_offset")
+    return {
+        "z_mapping_known": np.asarray(True),
+        "z_reflected": np.asarray(bool(z_reflected)),
+        "z_reflection_offset": np.asarray(float(z_reflection_offset)),
+    }
+
+
+def _deserialize_z_mapping(
+    data: np.lib.npyio.NpzFile,
+) -> tuple[bool | None, float | None]:
+    """Read validated scalar Z mapping fields from a schema-1.2 archive."""
+    known_array = np.asarray(data["z_mapping_known"])
+    reflected_array = np.asarray(data["z_reflected"])
+    offset_array = np.asarray(data["z_reflection_offset"])
+    if known_array.ndim != 0 or known_array.dtype.kind != "b":
+        raise ValueError("z_mapping_known must be a scalar boolean")
+    if reflected_array.ndim != 0 or reflected_array.dtype.kind != "b":
+        raise ValueError("z_reflected must be a scalar boolean")
+    if offset_array.ndim != 0:
+        raise ValueError("z_reflection_offset must be a scalar")
+
+    if not bool(known_array.item()):
+        return None, None
+    offset = float(offset_array.item())
+    if not np.isfinite(offset):
+        raise ValueError("known Z mapping requires a finite z_reflection_offset")
+    return bool(reflected_array.item()), offset
 
 
 def _as_1d_int(data: np.lib.npyio.NpzFile, key: str) -> np.ndarray:
@@ -475,6 +521,10 @@ class DeprojResult:
     voxel_depth: float = 1.0
     source_shape: tuple[int, int] = (0, 0)
     prepared_heightmap: np.ndarray | None = field(default=None, repr=False)
+    # Mapping from geometric Z back to the original acquisition stack.  None
+    # identifies results written before this information was persisted.
+    z_reflected: bool | None = None
+    z_reflection_offset: float | None = None
 
     @property
     def cells(self) -> list[Epicell]:
@@ -563,6 +613,7 @@ class DeprojResult:
             "voxel_depth": np.asarray(float(self.voxel_depth)),
             "units": np.asarray(str(self.units)),
             "source_shape": source_shape,
+            **_serialize_z_mapping(self.z_reflected, self.z_reflection_offset),
             **_serialize_prepared_heightmap(self.prepared_heightmap),
             **_serialize_epicells(self.epicells),
             **_serialize_junction_graph(self.junction_graph),
@@ -627,6 +678,15 @@ class DeprojResult:
                 )
             if version == "1.1":
                 required.add("cell_surface_centroids")
+            if version == "1.2":
+                required.update(
+                    {
+                        "cell_surface_centroids",
+                        "z_mapping_known",
+                        "z_reflected",
+                        "z_reflection_offset",
+                    }
+                )
             _require_keys(data, required)
             coordinate_order = _as_scalar_string(data, "coordinate_order")
             if coordinate_order != "cell_xyz_graph_xyz_image_yx":
@@ -652,6 +712,10 @@ class DeprojResult:
 
             epicells = _deserialize_epicells(data, format_version=version)
             graph = _deserialize_junction_graph(data)
+            z_reflected = None
+            z_reflection_offset = None
+            if version == "1.2":
+                z_reflected, z_reflection_offset = _deserialize_z_mapping(data)
 
         return cls._from_serialized_components(
             epicells=epicells,
@@ -661,6 +725,8 @@ class DeprojResult:
             voxel_depth=voxel_depth,
             source_shape=source_shape,
             prepared_heightmap=prepared_heightmap,
+            z_reflected=z_reflected,
+            z_reflection_offset=z_reflection_offset,
         )
 
     @classmethod
@@ -674,6 +740,8 @@ class DeprojResult:
         voxel_depth: float,
         source_shape: tuple[int, int],
         prepared_heightmap: np.ndarray | None,
+        z_reflected: bool | None = None,
+        z_reflection_offset: float | None = None,
     ) -> "DeprojResult":
         """Rebuild a result directly from validated serialized components."""
         return cls(
@@ -684,4 +752,6 @@ class DeprojResult:
             voxel_depth=voxel_depth,
             source_shape=source_shape,
             prepared_heightmap=prepared_heightmap,
+            z_reflected=z_reflected,
+            z_reflection_offset=z_reflection_offset,
         )

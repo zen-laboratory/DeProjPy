@@ -20,6 +20,7 @@ def test_script_examples_can_be_called_from_python(tmp_path, deproj_samples):
     labeled_run = _load_example(repository / "examples" / "03_run_labeled_sample.py")
     labeled_plots = _load_example(repository / "examples" / "04_label_plots.py")
     surface_distances = _load_example(repository / "examples" / "05_surface_distances.py")
+    intensities = _load_example(repository / "examples" / "06_surface_normal_intensity.py")
 
     _, frame, csv_path = run_sample.run_sample(
         deproj_samples / "Segmentation-2.tif",
@@ -66,3 +67,12 @@ def test_script_examples_can_be_called_from_python(tmp_path, deproj_samples):
     assert surface_output["distances"]["heightmap_straight_surface"] > 0
     assert surface_output["distances"]["boundary_straight_surface_pixel_input"] > 0
     assert surface_output["distances"]["boundary_graph_geodesic"] > 0
+
+    intensity_result, intensity_regions, intensity_measurements = intensities.main(
+        tmp_path / "intensity"
+    )
+    assert len(intensity_result.epicells) == len(intensity_regions.cells) == 4
+    assert len(intensity_measurements.table) == 8
+    assert (tmp_path / "intensity" / "measurements.npz").is_file()
+    assert (tmp_path / "intensity" / "prism_preview.png").stat().st_size > 0
+    assert (tmp_path / "intensity" / "mean_feature_map.png").stat().st_size > 0
