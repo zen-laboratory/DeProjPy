@@ -69,6 +69,41 @@ def test_sample_blocks_respect_budget_and_combine_cells():
     assert sum(len(block.geometric_xyz) for block in blocks) == sum(
         plan.sample_count for plan in plans
     )
+    completed = [
+        region_index
+        for block in blocks
+        for region_index in block.completed_region_indices
+    ]
+    assert completed == [plan.region_index for plan in plans]
+
+
+def test_clipping_reuses_base_spacing_quadrature_without_oversampling():
+    result = _result(
+        [
+            [[2, 1, 3], [4, 1, 3], [4, 3, 3], [2, 3, 3]],
+            [[-0.5, 1, 3], [1.5, 1, 3], [1.5, 3, 3], [-0.5, 3, 3]],
+        ]
+    )
+    regions = intensity.prepare_regions(
+        result,
+        (0, 2),
+        tissue_side="increasing_z",
+        sampling_spacing=0.5,
+    )
+    shape = (10, 10, 10)
+    coverages = [
+        classify_region_coverage(region, regions, shape)
+        for region in regions.cells
+    ]
+    plans = build_sampling_plans(regions, coverages)
+
+    assert not coverages[0].clipped
+    assert coverages[1].clipped
+    assert plans[0].lateral_points_uv is regions.cells[0].lateral_points_uv
+    assert plans[1].lateral_points_uv is regions.cells[1].lateral_points_uv
+    assert plans[0].area_weights is regions.cells[0].area_weights
+    assert plans[1].area_weights is regions.cells[1].area_weights
+    assert plans[0].sample_count == plans[1].sample_count
 
 
 def test_measurement_agrees_across_batch_sizes_and_channels():
@@ -123,6 +158,87 @@ def test_exact_quantile_buffer_has_separate_limit():
             measurements="median",
             max_buffered_samples_per_cell=2,
         )
+
+
+def test_completed_region_buffers_are_released_during_sampling(monkeypatch):
+    boundaries = []
+    identifiers = []
+    for index in range(10):
+        x0 = 2.0 + 5.0 * index
+        boundaries.append(
+            [[x0, 2, 5], [x0 + 2, 2, 5], [x0 + 2, 4, 5], [x0, 4, 5]]
+        )
+        identifiers.append(100 + 7 * index)
+    boundaries.extend(
+        [
+            [[-8, 2, 5], [-6, 2, 5], [-6, 4, 5], [-8, 4, 5]],
+            [[1, 1, 5], [2, 1, 5], [3, 1, 5]],
+        ]
+    )
+    identifiers.extend([901, 999])
+    result = _result(boundaries, ids=identifiers)
+    regions = intensity.prepare_regions(
+        result,
+        (0, 2),
+        tissue_side="increasing_z",
+        sampling_spacing=0.5,
+    )
+
+    shape = (12, 60, 60)
+    coverages = [
+        classify_region_coverage(region, regions, shape)
+        if region.status == "ok"
+        else None
+        for region in regions.cells
+    ]
+    plans = build_sampling_plans(regions, coverages)
+    largest_region = max(plan.sample_count for plan in plans)
+    total_samples = sum(plan.sample_count for plan in plans)
+
+    live_samples = 0
+    peak_samples = 0
+    clear_events = []
+    original_update = statistics.StreamingReducer.update
+    original_clear = statistics.StreamingReducer.clear_buffered_samples
+
+    def tracked_update(reducer, values, weights):
+        nonlocal live_samples, peak_samples
+        before = reducer.buffered_sample_count
+        original_update(reducer, values, weights)
+        live_samples += reducer.buffered_sample_count - before
+        peak_samples = max(peak_samples, live_samples)
+
+    def tracked_clear(reducer):
+        nonlocal live_samples
+        retained = reducer.buffered_sample_count
+        original_clear(reducer)
+        live_samples -= retained
+        clear_events.append(retained)
+
+    monkeypatch.setattr(statistics.StreamingReducer, "update", tracked_update)
+    monkeypatch.setattr(
+        statistics.StreamingReducer,
+        "clear_buffered_samples",
+        tracked_clear,
+    )
+
+    measured = intensity.measure(
+        {"a": np.ones(shape), "b": np.full(shape, 2.0)},
+        regions,
+        max_batch_samples=37,
+    )
+
+    assert live_samples == 0
+    assert len(clear_events) == 10 * 2
+    assert peak_samples <= 2 * (largest_region + 37)
+    assert peak_samples < 2 * total_samples
+    assert measured.table["id"].tolist() == identifiers * 2
+    assert set(measured.table.loc[measured.table.id == 901, "status"]) == {
+        "outside_stack"
+    }
+    assert set(measured.table.loc[measured.table.id == 999, "status"]) == {
+        "invalid_geometry"
+    }
 
 
 def test_weighted_histogram_mode_uses_density_and_volume_weights():
@@ -257,6 +373,8 @@ def test_mode_edges_and_sparse_identifiers_are_retained_per_channel(tmp_path):
     assert set(measured.table["channel"]) == {"zero", "one"}
     assert measured.table["mode_bin_edges"].apply(lambda value: value == [-0.5, 0.5, 1.5]).all()
     assert measured.provenance["mode"]["bins"] == [-0.5, 0.5, 1.5]
+    assert "base sampling_spacing" in measured.provenance["boundary_quadrature"]
+    assert "clipped_refinement_factor" not in measured.provenance
 
     loaded = intensity.MeasurementResult.load(
         measured.save(tmp_path / "mode-measurements.npz")

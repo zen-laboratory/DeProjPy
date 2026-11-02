@@ -6,8 +6,6 @@ from collections import deque
 
 import numpy as np
 
-from ._models import CellRegion
-
 
 def _cross_2d(first: np.ndarray, second: np.ndarray) -> float:
     """Return the scalar 2-D cross product without NumPy's 3-D promotion."""
@@ -346,31 +344,3 @@ def depth_midpoint_quadrature(
     depth_points = start_depth + (np.arange(bin_count, dtype=float) + 0.5) * bin_width
     depth_widths = np.full(bin_count, bin_width, dtype=float)
     return depth_points, depth_widths
-
-
-def materialize_region_samples(
-    region: CellRegion,
-    sampling_spacing: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Materialize Stage 1 prism samples for the current measurement path.
-
-    Stage 2 replaces this compatibility helper with lazy bounded blocks. The
-    lateral rule itself is already cached on ``region`` and will be reused.
-    """
-    depth_points, depth_widths = depth_midpoint_quadrature(
-        region.start_depth,
-        region.end_depth,
-        sampling_spacing,
-    )
-    footprint_xyz = (
-        region.plane_origin_xyz
-        + region.lateral_points_uv @ region.plane_basis_xyz.T
-    )
-    geometric_xyz = (
-        footprint_xyz[:, None, :]
-        + depth_points[None, :, None] * region.normal_xyz
-    ).reshape(-1, 3)
-    volume_weights = (
-        region.area_weights[:, None] * depth_widths[None, :]
-    ).reshape(-1)
-    return geometric_xyz, volume_weights

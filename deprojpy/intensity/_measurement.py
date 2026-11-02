@@ -177,7 +177,7 @@ def _status_for_result(
     if sampled_volume == 0.0:
         return (
             "unresolved_sampling_coverage",
-            "potential prism/stack intersection contains no refined quadrature point",
+            "potential prism/stack intersection contains no in-bounds quadrature point",
         )
     if nonfinite_omitted:
         return "nonfinite_omitted", "nonfinite interpolates were omitted"
@@ -271,16 +271,21 @@ def measure(
     # differ between otherwise aligned images.
     sampled_volume = np.zeros(cell_count, dtype=float)
     nonfinite_omitted = np.zeros((len(channels), cell_count), dtype=bool)
-    reducers = [
-        [
-            statistics.StreamingReducer(
-                requirements=requirements,
-                max_buffered_samples=max_buffered_samples_per_cell,
-            )
-            for _ in regions.cells
-        ]
+    # Reducers are created lazily for regions that contribute an in-bounds
+    # sample. Finalized scalar results live in fixed output slots, while the
+    # potentially large exact-statistic buffers remain only in active reducers.
+    active_reducers: list[dict[int, statistics.StreamingReducer]] = [
+        {} for _ in channels
+    ]
+    finalized_metrics = [
+        [_empty_statistics() for _ in regions.cells]
         for _ in channels
     ]
+    finalized_mode_edges: list[list[list[float] | None]] = [
+        [None for _ in regions.cells]
+        for _ in channels
+    ]
+    finite_volume = np.zeros((len(channels), cell_count), dtype=float)
 
     # Generate geometry once and reuse each bounded index block across channels.
     for block in iter_sample_blocks(regions, plans, max_batch_samples):
@@ -327,17 +332,45 @@ def measure(
                 region_finite = belongs_to_region & finite
                 if np.any(belongs_to_region & ~finite):
                     nonfinite_omitted[channel_index, region_index] = True
-                reducers[channel_index][region_index].update(
+                region_key = int(region_index)
+                reducer = active_reducers[channel_index].get(region_key)
+                if reducer is None:
+                    reducer = statistics.StreamingReducer(
+                        requirements=requirements,
+                        max_buffered_samples=max_buffered_samples_per_cell,
+                    )
+                    active_reducers[channel_index][region_key] = reducer
+                reducer.update(
                     values[region_finite],
                     valid_weights[region_finite],
                 )
+
+        # A completion marker is attached only to the block containing the
+        # region's final coordinates. Finalize after every channel has consumed
+        # that block, then release exact quantile/mode buffers immediately.
+        for region_index in block.completed_region_indices:
+            for channel_index in range(len(channels)):
+                reducer = active_reducers[channel_index].pop(region_index, None)
+                if reducer is None:
+                    continue
+                metric_values, mode_edges = _finalize_reducer(
+                    reducer,
+                    selected,
+                    normalized_mode_bins,
+                )
+                finalized_metrics[channel_index][region_index] = metric_values
+                finalized_mode_edges[channel_index][region_index] = mode_edges
+                finite_volume[channel_index, region_index] = reducer.finite_volume
+                reducer.clear_buffered_samples()
+
+    if any(active_reducers_for_channel for active_reducers_for_channel in active_reducers):
+        raise RuntimeError("internal sampling error: unfinished region reducers remain")
 
     # Finalize every cell/channel explicitly so sparse IDs, invalid geometry,
     # and completely uncovered prisms remain represented in the table.
     rows = []
     for channel_index, (channel_name, _) in enumerate(channels):
         for region_index, region in enumerate(regions.cells):
-            reducer = reducers[channel_index][region_index]
             coverage = coverages[region_index]
             requested_volume = (
                 region.footprint_area * (region.end_depth - region.start_depth)
@@ -356,11 +389,8 @@ def measure(
                 sampled_volume[region_index],
                 nonfinite_omitted[channel_index, region_index],
             )
-            metric_values, mode_edges = _finalize_reducer(
-                reducer,
-                selected,
-                normalized_mode_bins,
-            )
+            metric_values = finalized_metrics[channel_index][region_index]
+            mode_edges = finalized_mode_edges[channel_index][region_index]
 
             row = {
                 "id": region.cell_id,
@@ -371,7 +401,7 @@ def measure(
                 "reason": reason,
                 "requested_volume": requested_volume,
                 "sampled_volume": sampled_volume[region_index],
-                "finite_volume": reducer.finite_volume,
+                "finite_volume": finite_volume[channel_index, region_index],
                 "coverage_fraction": coverage_fraction,
             }
             for name in selected:
@@ -418,7 +448,10 @@ def measure(
         "nonfinite_policy": "omit; finite_volume is the contributing denominator",
         "interpolation_support": "closed index box [0, size - 1]",
         "lateral_quadrature": "longest-edge subdivision; triangle centroids",
-        "clipped_refinement_factor": 4,
+        "boundary_quadrature": (
+            "base sampling_spacing; include an element iff its sampling point "
+            "is inside interpolation support"
+        ),
         "weighted_quantile": "inverse weighted empirical CDF",
         "standard_deviation": "weighted population standard deviation",
         "mode": {

@@ -10,10 +10,14 @@ from deprojpy.intensity._quadrature import (
     build_lateral_quadrature,
     clean_polygon,
     depth_midpoint_quadrature,
-    materialize_region_samples,
     signed_polygon_area,
     subdivide_triangles,
     triangulate_polygon,
+)
+from deprojpy.intensity._sampling import (
+    build_sampling_plans,
+    classify_region_coverage,
+    iter_sample_blocks,
 )
 
 
@@ -122,7 +126,11 @@ def test_prism_quadrature_is_affine_exact_for_tilted_cell():
         spacing_zyx=(1, 1, 1),
     )
     region = regions.cells[0]
-    points_xyz, volume_weights = materialize_region_samples(region, 20)
+    coverage = classify_region_coverage(region, regions, (12, 12, 12))
+    plans = build_sampling_plans(regions, [coverage])
+    blocks = list(iter_sample_blocks(regions, plans, max_samples=2))
+    points_xyz = np.vstack([block.geometric_xyz for block in blocks])
+    volume_weights = np.concatenate([block.volume_weights for block in blocks])
 
     polygon_centroid_uv = _polygon_centroid(region.polygon_uv)
     expected_centroid_xyz = (

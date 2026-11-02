@@ -124,6 +124,22 @@ class StreamingReducer:
             return np.empty(0, dtype=float), np.empty(0, dtype=float)
         return np.concatenate(self._value_parts), np.concatenate(self._weight_parts)
 
+    @property
+    def buffered_sample_count(self) -> int:
+        """Return retained sample count without concatenating buffer parts."""
+        return sum(len(part) for part in self._value_parts)
+
+    def clear_buffered_samples(self) -> None:
+        """Release exact-statistic buffers after this region is finalized.
+
+        The reducer's scalar streaming state remains available, but measurement
+        removes the reducer immediately afterward. Clearing explicitly makes
+        lifetime independent of garbage-collector timing and is observable in
+        focused memory-lifetime tests.
+        """
+        self._value_parts.clear()
+        self._weight_parts.clear()
+
 
 def weighted_quantiles(
     values: np.ndarray,

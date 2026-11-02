@@ -74,11 +74,13 @@ def test_legacy_measurement_archive_remains_loadable(tmp_path):
         path,
         format_version=np.asarray("1.0"),
         table_json=np.asarray(original.table.to_json(orient="table", index=False)),
-        provenance_json=np.asarray(json.dumps({"units": "µm"})),
+        provenance_json=np.asarray(
+            json.dumps({"units": "µm", "clipped_refinement_factor": 4})
+        ),
     )
 
     loaded = MeasurementResult.load(path)
-    assert loaded.provenance == {"units": "µm"}
+    assert loaded.provenance == {"units": "µm", "clipped_refinement_factor": 4}
     assert list(loaded.table.columns) == list(original.table.columns)
 
 

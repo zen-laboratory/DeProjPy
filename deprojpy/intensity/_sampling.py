@@ -9,7 +9,7 @@ import numpy as np
 
 from ._coordinates import geometric_xyz_to_stack_index_zyx
 from ._models import CellRegion, PreparedRegions
-from ._quadrature import build_lateral_quadrature, depth_midpoint_quadrature
+from ._quadrature import depth_midpoint_quadrature
 
 
 @dataclass(frozen=True)
@@ -30,11 +30,12 @@ class RegionSamplingPlan:
 
 @dataclass(frozen=True)
 class SampleBlock:
-    """At most one configured budget of geometric samples."""
+    """At most one configured budget of samples plus explicit completions."""
 
     geometric_xyz: np.ndarray
     volume_weights: np.ndarray
     region_indices: np.ndarray
+    completed_region_indices: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -83,19 +84,14 @@ def classify_region_coverage(
 def build_sampling_plans(
     regions: PreparedRegions,
     coverages: list[RegionCoverage | None],
-    *,
-    clipped_refinement: int = 4,
 ) -> list[RegionSamplingPlan]:
-    """Select base or boundary-refined quadrature for measurable regions.
+    """Reuse base-spacing quadrature for every potentially measurable region.
 
-    A clipped prism is resampled at one quarter of the requested spacing by
-    default. This reduces missed boundary slivers without claiming exact
-    polyhedron-box intersection. If refined quadrature still finds no supported
-    point, measurement reports unresolved sampling coverage rather than calling
-    the geometry outside.
+    Clipping changes only which sampling points are accepted later. It does not
+    trigger hidden oversampling: clipped and unclipped cells use the same cached
+    lateral rule and requested normal-depth spacing. Users can explicitly lower
+    ``sampling_spacing`` when they need a convergence check.
     """
-    if not isinstance(clipped_refinement, int) or clipped_refinement < 1:
-        raise ValueError("clipped_refinement must be a positive integer")
 
     plans: list[RegionSamplingPlan] = []
     for region_index, region in enumerate(regions.cells):
@@ -103,33 +99,17 @@ def build_sampling_plans(
         if region.status != "ok" or coverage is None or coverage.definitely_disjoint:
             continue
 
-        # Refine the entire clipped prism rather than only observed in-bounds
-        # samples: a coarse rule may not observe a thin supported boundary sliver.
-        if coverage.clipped and clipped_refinement > 1:
-            refined_spacing = regions.sampling_spacing / clipped_refinement
-            lateral_points_uv, area_weights, _ = build_lateral_quadrature(
-                region.polygon_uv,
-                refined_spacing,
-            )
-            depth_points, depth_widths = depth_midpoint_quadrature(
-                region.start_depth,
-                region.end_depth,
-                refined_spacing,
-            )
-        else:
-            lateral_points_uv = region.lateral_points_uv
-            area_weights = region.area_weights
-            depth_points, depth_widths = depth_midpoint_quadrature(
-                region.start_depth,
-                region.end_depth,
-                regions.sampling_spacing,
-            )
+        depth_points, depth_widths = depth_midpoint_quadrature(
+            region.start_depth,
+            region.end_depth,
+            regions.sampling_spacing,
+        )
 
         plans.append(
             RegionSamplingPlan(
                 region_index=region_index,
-                lateral_points_uv=lateral_points_uv,
-                area_weights=area_weights,
+                lateral_points_uv=region.lateral_points_uv,
+                area_weights=region.area_weights,
                 depth_points=depth_points,
                 depth_widths=depth_widths,
             )
@@ -156,6 +136,7 @@ def iter_sample_blocks(
     xyz_parts: list[np.ndarray] = []
     weight_parts: list[np.ndarray] = []
     region_parts: list[np.ndarray] = []
+    completed_regions: list[int] = []
     block_size = 0
 
     for plan in plans:
@@ -193,6 +174,11 @@ def iter_sample_blocks(
             )
             block_size += take
             cursor += take
+            if cursor == plan.sample_count:
+                # Completion means every coordinate for this region has been
+                # generated. Measurement finalizes it only after all channels
+                # have consumed the enclosing block.
+                completed_regions.append(plan.region_index)
 
             # Yield exactly at the budget so a single large cell is naturally
             # split and several small cells are naturally combined.
@@ -201,10 +187,12 @@ def iter_sample_blocks(
                     geometric_xyz=np.concatenate(xyz_parts, axis=0),
                     volume_weights=np.concatenate(weight_parts),
                     region_indices=np.concatenate(region_parts),
+                    completed_region_indices=tuple(completed_regions),
                 )
                 xyz_parts.clear()
                 weight_parts.clear()
                 region_parts.clear()
+                completed_regions.clear()
                 block_size = 0
 
     if block_size:
@@ -212,4 +200,5 @@ def iter_sample_blocks(
             geometric_xyz=np.concatenate(xyz_parts, axis=0),
             volume_weights=np.concatenate(weight_parts),
             region_indices=np.concatenate(region_parts),
+            completed_region_indices=tuple(completed_regions),
         )

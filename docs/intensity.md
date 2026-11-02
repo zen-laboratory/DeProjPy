@@ -49,10 +49,14 @@ population standard deviation, median and quartiles are volume weighted;
 quantiles use the inverse weighted empirical CDF. `raw_sample_sum` depends on
 sampling density. Interpolated measurements estimate a physical region—not an
 original-voxel histogram—and oversampling does not add optical resolution.
-Clipped regions receive fourfold boundary refinement. This is numerical
-quadrature, not an exact arbitrary prism/box intersection volume; if geometry
-may intersect the stack but refined samples still miss it, status is
-`unresolved_sampling_coverage` rather than the incorrect `outside_stack`.
+Clipped and unclipped cells use the same requested `sampling_spacing` and
+quadrature. A boundary element contributes its full existing volume weight when
+its sampling point lies inside interpolation support, and contributes nothing
+otherwise. Thus clipped `sampled_volume` and `coverage_fraction` are numerical
+estimates, not exact arbitrary prism/box intersections. Reduce the one explicit
+`sampling_spacing` to perform a convergence check. If geometry may intersect
+the stack but samples miss it, status is `unresolved_sampling_coverage` rather
+than the incorrect `outside_stack`.
 
 `mode` is a volume-weighted histogram estimate rather than exact-value
 frequency counting. `mode_bins` accepts `"auto"`, a positive bin count, or
@@ -68,7 +72,13 @@ median/quantiles buffer one cell's interpolated values; interpolation itself is
 generated and interpolated in blocks of at most `max_batch_samples`, including
 within one large cell. Streaming-only selections do not sort or buffer sample
 values. Exact quantiles and mode have a separate
-`max_buffered_samples_per_cell` limit.
+`max_buffered_samples_per_cell` limit. Each cell is finalized after its last
+sample block has been consumed by every channel, and its exact-statistic buffers
+are then released. Peak buffer memory therefore follows active regions plus the
+current batch rather than all previously completed cells. One large cell can
+still require substantial exact-statistic storage, and concatenation/sorting
+temporarily adds memory. Cached lateral quadrature is a separate preparation
+cost and is not bounded by `max_batch_samples`.
 
 `plot_region_preview` draws the original boundary, both requested depth faces,
 connecting prism sides, and the positive-depth normal with physical XYZ aspect.
