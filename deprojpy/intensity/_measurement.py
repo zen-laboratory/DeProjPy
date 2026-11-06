@@ -299,55 +299,55 @@ def measure(
             axis=1,
         )
         valid_indices = np.flatnonzero(in_bounds)
-        if len(valid_indices) == 0:
-            continue
-
-        # Drop unsupported points rather than clipping them onto the image edge.
-        # Their weights remain absent from sampled_volume by definition.
-        valid_regions = block.region_indices[valid_indices]
-        valid_weights = block.volume_weights[valid_indices]
-        sampled_volume += np.bincount(
-            valid_regions,
-            weights=valid_weights,
-            minlength=cell_count,
-        )
-
-        # Interpolate one channel at a time so channel count does not multiply
-        # coordinate/value scratch memory. Region IDs preserve stable grouping.
-        for channel_index, (_, image) in enumerate(channels):
-            values = ndimage.map_coordinates(
-                image,
-                stack_index_zyx[valid_indices].T,
-                order=1,
-                mode="constant",
-                cval=np.nan,
-                prefilter=False,
-                output=float,
+        if len(valid_indices):
+            # Drop unsupported points rather than clipping them onto the image
+            # edge. Their weights remain absent from sampled_volume by definition.
+            valid_regions = block.region_indices[valid_indices]
+            valid_weights = block.volume_weights[valid_indices]
+            sampled_volume += np.bincount(
+                valid_regions,
+                weights=valid_weights,
+                minlength=cell_count,
             )
-            # Nonfinite interpolates contribute to sampled volume but not to a
-            # finite-data statistic or its finite-volume denominator.
-            finite = np.isfinite(values)
-            for region_index in np.unique(valid_regions):
-                belongs_to_region = valid_regions == region_index
-                region_finite = belongs_to_region & finite
-                if np.any(belongs_to_region & ~finite):
-                    nonfinite_omitted[channel_index, region_index] = True
-                region_key = int(region_index)
-                reducer = active_reducers[channel_index].get(region_key)
-                if reducer is None:
-                    reducer = statistics.StreamingReducer(
-                        requirements=requirements,
-                        max_buffered_samples=max_buffered_samples_per_cell,
-                    )
-                    active_reducers[channel_index][region_key] = reducer
-                reducer.update(
-                    values[region_finite],
-                    valid_weights[region_finite],
+
+            # Interpolate one channel at a time so channel count does not multiply
+            # coordinate/value scratch memory. Region IDs preserve stable grouping.
+            for channel_index, (_, image) in enumerate(channels):
+                values = ndimage.map_coordinates(
+                    image,
+                    stack_index_zyx[valid_indices].T,
+                    order=1,
+                    mode="constant",
+                    cval=np.nan,
+                    prefilter=False,
+                    output=float,
                 )
+                # Nonfinite interpolates contribute to sampled volume but not to a
+                # finite-data statistic or its finite-volume denominator.
+                finite = np.isfinite(values)
+                for region_index in np.unique(valid_regions):
+                    belongs_to_region = valid_regions == region_index
+                    region_finite = belongs_to_region & finite
+                    if np.any(belongs_to_region & ~finite):
+                        nonfinite_omitted[channel_index, region_index] = True
+                    region_key = int(region_index)
+                    reducer = active_reducers[channel_index].get(region_key)
+                    if reducer is None:
+                        reducer = statistics.StreamingReducer(
+                            requirements=requirements,
+                            max_buffered_samples=max_buffered_samples_per_cell,
+                        )
+                        active_reducers[channel_index][region_key] = reducer
+                    reducer.update(
+                        values[region_finite],
+                        valid_weights[region_finite],
+                    )
 
         # A completion marker is attached only to the block containing the
-        # region's final coordinates. Finalize after every channel has consumed
-        # that block, then release exact quantile/mode buffers immediately.
+        # region's final coordinates. It must be handled even when this block is
+        # entirely out of bounds, because earlier blocks may own active reducers.
+        # Finalize after every channel has consumed the block, then release exact
+        # quantile/mode buffers immediately.
         for region_index in block.completed_region_indices:
             for channel_index in range(len(channels)):
                 reducer = active_reducers[channel_index].pop(region_index, None)

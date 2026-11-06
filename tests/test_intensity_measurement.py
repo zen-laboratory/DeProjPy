@@ -6,6 +6,7 @@ import pytest
 
 from deprojpy import intensity
 from deprojpy.intensity import _statistics as statistics
+from deprojpy.intensity._coordinates import geometric_xyz_to_stack_index_zyx
 from deprojpy.intensity._sampling import (
     build_sampling_plans,
     classify_region_coverage,
@@ -127,6 +128,67 @@ def test_measurement_agrees_across_batch_sizes_and_channels():
     single = intensity.measure(first, regions, measurements="mean", channel="first")
     mapped = intensity.measure({"first": first}, regions, measurements="mean")
     pd.testing.assert_frame_equal(single.table, mapped.table)
+
+
+def test_completion_runs_when_final_block_is_entirely_out_of_bounds():
+    # The prism starts inside the stack but extends beyond its maximum z index.
+    # Unit-size batches therefore place its completion marker on an empty block.
+    result = _result(
+        [[[2, 2, 4], [3, 2, 4], [3, 3, 4], [2, 3, 4]]],
+        ids=[73],
+    )
+    regions = intensity.prepare_regions(
+        result,
+        (0, 4),
+        tissue_side="increasing_z",
+        sampling_spacing=1,
+    )
+    shape = (6, 6, 6)
+    coverage = classify_region_coverage(regions.cells[0], regions, shape)
+    plans = build_sampling_plans(regions, [coverage])
+    one_sample_blocks = list(iter_sample_blocks(regions, plans, max_samples=1))
+    final_block = one_sample_blocks[-1]
+    final_index_zyx = geometric_xyz_to_stack_index_zyx(
+        final_block.geometric_xyz,
+        regions,
+    )
+
+    assert final_block.completed_region_indices == (0,)
+    final_in_bounds = np.all(
+        (final_index_zyx >= 0) & (final_index_zyx <= np.asarray(shape) - 1),
+        axis=1,
+    )
+    assert not np.any(final_in_bounds)
+
+    z_index, _, _ = np.indices(shape, dtype=float)
+    channels = {"constant": np.ones(shape), "z-gradient": z_index}
+    small = intensity.measure(
+        channels,
+        regions,
+        measurements="all",
+        max_batch_samples=1,
+    )
+    large = intensity.measure(
+        channels,
+        regions,
+        measurements="all",
+        max_batch_samples=10_000,
+    )
+
+    numeric_columns = [
+        column for column in small.table.columns if column != "mode_bin_edges"
+    ]
+    pd.testing.assert_frame_equal(
+        small.table[numeric_columns],
+        large.table[numeric_columns],
+        check_exact=False,
+        rtol=1e-13,
+        atol=1e-13,
+    )
+    assert small.table["mode_bin_edges"].tolist() == large.table["mode_bin_edges"].tolist()
+    assert set(small.table["status"]) == {"partial_coverage"}
+    assert (small.table["sampled_volume"] > 0).all()
+    assert (small.table["sampled_volume"] < small.table["requested_volume"]).all()
 
 
 def test_streaming_only_selection_does_not_sort_or_buffer(monkeypatch):
