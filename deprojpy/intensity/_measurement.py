@@ -9,7 +9,6 @@ import pandas as pd
 from scipy import ndimage
 
 from . import _statistics as statistics
-from ._coordinates import geometric_xyz_to_stack_index_zyx
 from ._models import MeasurementResult, PreparedRegions
 from ._sampling import (
     RegionCoverage,
@@ -137,28 +136,32 @@ def _finalize_reducer(
     if "maximum" in selected:
         output["maximum"] = reducer.maximum
 
-    # Quantiles and mode share one per-cell buffer. Quantiles share one stable
-    # sort; mode uses the same unsorted values for weighted histogramming.
-    values, weights = reducer.buffered_samples()
     requested_quantiles = {
         name: quantile
         for name, quantile in (("q25", 0.25), ("median", 0.5), ("q75", 0.75))
         if name in selected
     }
-    if requested_quantiles:
-        quantile_values = statistics.weighted_quantiles(
-            values,
-            weights,
-            requested_quantiles.values(),
-        )
-        for name, quantile in requested_quantiles.items():
-            output[name] = quantile_values[quantile]
-
     actual_mode_edges = None
-    if "mode" in selected:
-        mode, edges = statistics.weighted_histogram_mode(values, weights, mode_bins)
-        output["mode"] = mode
-        actual_mode_edges = edges.tolist()
+    if requested_quantiles or "mode" in selected:
+        # Quantiles and mode share one materialized per-cell buffer. A
+        # streaming-only selection never enters this allocation path.
+        values, weights = reducer.buffered_samples()
+        if requested_quantiles:
+            quantile_values = statistics.weighted_quantiles(
+                values,
+                weights,
+                requested_quantiles.values(),
+            )
+            for name, quantile in requested_quantiles.items():
+                output[name] = quantile_values[quantile]
+        if "mode" in selected:
+            mode, edges = statistics.weighted_histogram_mode(
+                values,
+                weights,
+                mode_bins,
+            )
+            output["mode"] = mode
+            actual_mode_edges = edges.tolist()
     return output, actual_mode_edges
 
 
@@ -287,50 +290,40 @@ def measure(
     ]
     finite_volume = np.zeros((len(channels), cell_count), dtype=float)
 
-    # Generate geometry once and reuse each bounded index block across channels.
-    for block in iter_sample_blocks(regions, plans, max_batch_samples):
-        stack_index_zyx = geometric_xyz_to_stack_index_zyx(
-            block.geometric_xyz,
-            regions,
-        )
-        supported_upper = np.asarray(image_shape_zyx, dtype=float) - 1.0
-        in_bounds = np.all(
-            (stack_index_zyx >= 0.0) & (stack_index_zyx <= supported_upper),
-            axis=1,
-        )
-        valid_indices = np.flatnonzero(in_bounds)
-        if len(valid_indices):
-            # Drop unsupported points rather than clipping them onto the image
-            # edge. Their weights remain absent from sampled_volume by definition.
-            valid_regions = block.region_indices[valid_indices]
-            valid_weights = block.volume_weights[valid_indices]
-            sampled_volume += np.bincount(
-                valid_regions,
-                weights=valid_weights,
-                minlength=cell_count,
-            )
+    # Coordinates are already compacted in bounds and grouped into contiguous
+    # region spans. Reuse each bounded coordinate block across aligned channels.
+    for block in iter_sample_blocks(
+        regions,
+        plans,
+        max_batch_samples,
+        image_shape_zyx,
+    ):
+        for span in block.region_spans:
+            sampled_volume[span.region_index] += span.sampled_volume
 
-            # Interpolate one channel at a time so channel count does not multiply
-            # coordinate/value scratch memory. Region IDs preserve stable grouping.
+        if len(block.stack_index_zyx):
+            # Interpolate one channel at a time so channel count does not
+            # multiply coordinate/value scratch memory. The same span offsets
+            # partition every channel's output without per-region mask scans.
             for channel_index, (_, image) in enumerate(channels):
                 values = ndimage.map_coordinates(
                     image,
-                    stack_index_zyx[valid_indices].T,
+                    block.stack_index_zyx.T,
                     order=1,
                     mode="constant",
                     cval=np.nan,
                     prefilter=False,
                     output=float,
                 )
-                # Nonfinite interpolates contribute to sampled volume but not to a
-                # finite-data statistic or its finite-volume denominator.
-                finite = np.isfinite(values)
-                for region_index in np.unique(valid_regions):
-                    belongs_to_region = valid_regions == region_index
-                    region_finite = belongs_to_region & finite
-                    if np.any(belongs_to_region & ~finite):
-                        nonfinite_omitted[channel_index, region_index] = True
-                    region_key = int(region_index)
+                # Nonfinite interpolates contribute to sampled volume but not
+                # to statistics or their finite-volume denominator.
+                for span in block.region_spans:
+                    span_values = values[span.start : span.stop]
+                    span_weights = block.volume_weights[span.start : span.stop]
+                    finite = np.isfinite(span_values)
+                    region_key = span.region_index
+                    if not np.all(finite):
+                        nonfinite_omitted[channel_index, region_key] = True
                     reducer = active_reducers[channel_index].get(region_key)
                     if reducer is None:
                         reducer = statistics.StreamingReducer(
@@ -339,8 +332,8 @@ def measure(
                         )
                         active_reducers[channel_index][region_key] = reducer
                     reducer.update(
-                        values[region_finite],
-                        valid_weights[region_finite],
+                        span_values[finite],
+                        span_weights[finite],
                     )
 
         # A completion marker is attached only to the block containing the

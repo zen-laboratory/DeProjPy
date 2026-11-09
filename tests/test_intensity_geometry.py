@@ -158,8 +158,17 @@ def test_prism_quadrature_is_affine_exact_for_tilted_cell():
     region = regions.cells[0]
     coverage = classify_region_coverage(region, regions, (12, 12, 12))
     plans = build_sampling_plans(regions, [coverage])
-    blocks = list(iter_sample_blocks(regions, plans, max_samples=2))
-    points_xyz = np.vstack([block.geometric_xyz for block in blocks])
+    blocks = list(
+        iter_sample_blocks(
+            regions,
+            plans,
+            max_samples=2,
+            image_shape_zyx=(12, 12, 12),
+        )
+    )
+    # This test uses unit spacing, zero origin, and no reflection, so reversing
+    # stack ZYX recovers the corresponding physical geometric XYZ coordinates.
+    points_xyz = np.vstack([block.stack_index_zyx[:, ::-1] for block in blocks])
     volume_weights = np.concatenate([block.volume_weights for block in blocks])
 
     polygon_centroid_uv = _polygon_centroid(region.polygon_uv)

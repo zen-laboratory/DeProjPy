@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 import numpy as np
+from numba import njit
 
 
 @dataclass(frozen=True)
@@ -141,12 +142,12 @@ class StreamingReducer:
         self._weight_parts.clear()
 
 
-def weighted_quantiles(
+def _stable_weighted_quantiles(
     values: np.ndarray,
     weights: np.ndarray,
     quantiles: Sequence[float],
 ) -> dict[float, float]:
-    """Calculate several inverse-weighted-empirical-CDF quantiles with one sort."""
+    """Reference inverse weighted empirical CDF using one stable sort."""
     # One stable ordering serves every requested probability and gives
     # deterministic behavior when repeated values straddle a threshold.
     order = np.argsort(values, kind="stable")
@@ -161,6 +162,180 @@ def weighted_quantiles(
         result[float(quantile)] = float(
             ordered_values[min(index, len(ordered_values) - 1)]
         )
+    return result
+
+
+@njit(cache=True)
+def _weighted_select_candidates(
+    values: np.ndarray,
+    weights: np.ndarray,
+    quantiles: np.ndarray,
+) -> np.ndarray:
+    """Select weighted candidates with deterministic three-way partitions."""
+    output = np.empty(len(quantiles), dtype=np.float64)
+    work_values = values.copy()
+    work_weights = weights.copy()
+    total_weight = 0.0
+    for weight in work_weights:
+        total_weight += weight
+
+    # Quantiles are few but may arrive in caller order. Sorting their targets
+    # lets left/equal/right branches share every partition of the sample arrays.
+    quantile_order = np.argsort(quantiles)
+    targets = quantiles[quantile_order] * total_weight
+    stack_capacity = 2 * len(quantiles) + 1
+    low_stack = np.empty(stack_capacity, dtype=np.int64)
+    high_stack = np.empty(stack_capacity, dtype=np.int64)
+    quantile_low_stack = np.empty(stack_capacity, dtype=np.int64)
+    quantile_high_stack = np.empty(stack_capacity, dtype=np.int64)
+    prefix_weight_stack = np.empty(stack_capacity, dtype=np.float64)
+    stack_size = 1
+    low_stack[0] = 0
+    high_stack[0] = len(work_values)
+    quantile_low_stack[0] = 0
+    quantile_high_stack[0] = len(quantiles)
+    prefix_weight_stack[0] = 0.0
+
+    while stack_size:
+        stack_size -= 1
+        low = low_stack[stack_size]
+        high = high_stack[stack_size]
+        quantile_low = quantile_low_stack[stack_size]
+        quantile_high = quantile_high_stack[stack_size]
+        prefix_weight = prefix_weight_stack[stack_size]
+
+        # Median-of-three avoids the deterministic worst case of choosing an
+        # already sorted endpoint while guaranteeing a present pivot.
+        first = work_values[low]
+        middle = work_values[low + (high - low) // 2]
+        last = work_values[high - 1]
+        if first < middle:
+            pivot = middle if middle < last else (last if first < last else first)
+        else:
+            pivot = first if first < last else (last if middle < last else middle)
+
+        less = low
+        scan = low
+        greater = high
+        less_weight = 0.0
+        equal_weight = 0.0
+        while scan < greater:
+            value = work_values[scan]
+            if value < pivot:
+                saved_value = work_values[less]
+                work_values[less] = work_values[scan]
+                work_values[scan] = saved_value
+                saved_weight = work_weights[less]
+                work_weights[less] = work_weights[scan]
+                work_weights[scan] = saved_weight
+                less_weight += work_weights[less]
+                less += 1
+                scan += 1
+            elif value > pivot:
+                greater -= 1
+                saved_value = work_values[greater]
+                work_values[greater] = work_values[scan]
+                work_values[scan] = saved_value
+                saved_weight = work_weights[greater]
+                work_weights[greater] = work_weights[scan]
+                work_weights[scan] = saved_weight
+            else:
+                equal_weight += work_weights[scan]
+                scan += 1
+
+        less_boundary = prefix_weight + less_weight
+        equal_boundary = less_boundary + equal_weight
+        left_end = quantile_low
+        while left_end < quantile_high and targets[left_end] <= less_boundary:
+            left_end += 1
+        equal_end = left_end
+        while equal_end < quantile_high and targets[equal_end] <= equal_boundary:
+            output[quantile_order[equal_end]] = pivot
+            equal_end += 1
+
+        if equal_end < quantile_high:
+            low_stack[stack_size] = greater
+            high_stack[stack_size] = high
+            quantile_low_stack[stack_size] = equal_end
+            quantile_high_stack[stack_size] = quantile_high
+            prefix_weight_stack[stack_size] = equal_boundary
+            stack_size += 1
+        if quantile_low < left_end:
+            low_stack[stack_size] = low
+            high_stack[stack_size] = less
+            quantile_low_stack[stack_size] = quantile_low
+            quantile_high_stack[stack_size] = left_end
+            prefix_weight_stack[stack_size] = prefix_weight
+            stack_size += 1
+
+    return output
+
+
+def _summation_relative_error(count: int, *, includes_product: bool = False) -> float:
+    """Bound reference float64 sums relative to a long-double estimate."""
+    float_epsilon = np.finfo(float).eps
+    long_epsilon = np.finfo(np.longdouble).eps
+    float_error = count * float_epsilon / (1.0 - count * float_epsilon)
+    long_error = count * long_epsilon / (1.0 - count * long_epsilon)
+    combined = float_error + long_error + float_error * long_error
+    if includes_product:
+        combined += float_epsilon + combined * float_epsilon
+    return float(combined)
+
+
+def _selection_is_certified(
+    values: np.ndarray,
+    weights: np.ndarray,
+    quantile: float,
+    candidate: float,
+) -> bool:
+    """Prove that summation order cannot move the reference threshold."""
+    # The stable reference adds positive weights in value order. Long-double
+    # sums estimate the exact totals; conservative error bounds cover both that
+    # estimate and every float64 cumulative addition in the reference path.
+    total = np.sum(weights, dtype=np.longdouble)
+    total_error = _summation_relative_error(len(weights), includes_product=True)
+
+    below_mask = values < candidate
+    below_count = int(np.count_nonzero(below_mask))
+    below = np.sum(weights[below_mask], dtype=np.longdouble)
+    del below_mask
+
+    through_mask = values <= candidate
+    through_count = int(np.count_nonzero(through_mask))
+    through = np.sum(weights[through_mask], dtype=np.longdouble)
+    del through_mask
+
+    below_error = _summation_relative_error(below_count)
+    through_error = _summation_relative_error(through_count)
+    target = np.longdouble(quantile) * total
+    target_low = target * (1.0 - total_error)
+    target_high = target * (1.0 + total_error)
+    below_high = below * (1.0 + below_error)
+    through_low = through * (1.0 - through_error)
+    return bool(target_low > below_high and target_high <= through_low)
+
+
+def weighted_quantiles(
+    values: np.ndarray,
+    weights: np.ndarray,
+    quantiles: Sequence[float],
+) -> dict[float, float]:
+    """Calculate exact inverse-weighted-empirical-CDF quantiles."""
+    requested = tuple(float(quantile) for quantile in quantiles)
+    candidates = _weighted_select_candidates(
+        values,
+        weights,
+        np.asarray(requested, dtype=float),
+    )
+
+    result = {}
+    for quantile, candidate in zip(requested, candidates, strict=True):
+        if not _selection_is_certified(values, weights, quantile, candidate):
+            # Near a cumulative-weight boundary, partition regrouping can alter
+            # the chosen sample. Stable sorting retains the historical answer.
+            return _stable_weighted_quantiles(values, weights, requested)
+        result[quantile] = float(candidate)
     return result
 
 

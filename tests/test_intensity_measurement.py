@@ -6,7 +6,6 @@ import pytest
 
 from deprojpy import intensity
 from deprojpy.intensity import _statistics as statistics
-from deprojpy.intensity._coordinates import geometric_xyz_to_stack_index_zyx
 from deprojpy.intensity._sampling import (
     build_sampling_plans,
     classify_region_coverage,
@@ -59,15 +58,14 @@ def test_sample_blocks_respect_budget_and_combine_cells():
         for region in regions.cells
     ]
     plans = build_sampling_plans(regions, coverages)
-    blocks = list(iter_sample_blocks(regions, plans, max_samples=31))
+    blocks = list(iter_sample_blocks(regions, plans, max_samples=31, image_shape_zyx=shape))
 
     assert blocks
     assert max(plan.sample_count for plan in plans) > 31
-    assert all(len(block.geometric_xyz) <= 31 for block in blocks)
+    assert all(len(block.stack_index_zyx) <= 31 for block in blocks)
     assert all(len(block.volume_weights) <= 31 for block in blocks)
-    assert all(len(block.region_indices) <= 31 for block in blocks)
-    assert any(len(np.unique(block.region_indices)) > 1 for block in blocks)
-    assert sum(len(block.geometric_xyz) for block in blocks) == sum(
+    assert any(len(block.region_spans) > 1 for block in blocks)
+    assert sum(len(block.stack_index_zyx) for block in blocks) == sum(
         plan.sample_count for plan in plans
     )
     completed = [
@@ -146,19 +144,14 @@ def test_completion_runs_when_final_block_is_entirely_out_of_bounds():
     shape = (6, 6, 6)
     coverage = classify_region_coverage(regions.cells[0], regions, shape)
     plans = build_sampling_plans(regions, [coverage])
-    one_sample_blocks = list(iter_sample_blocks(regions, plans, max_samples=1))
-    final_block = one_sample_blocks[-1]
-    final_index_zyx = geometric_xyz_to_stack_index_zyx(
-        final_block.geometric_xyz,
-        regions,
+    one_sample_blocks = list(
+        iter_sample_blocks(regions, plans, max_samples=1, image_shape_zyx=shape)
     )
+    final_block = one_sample_blocks[-1]
 
     assert final_block.completed_region_indices == (0,)
-    final_in_bounds = np.all(
-        (final_index_zyx >= 0) & (final_index_zyx <= np.asarray(shape) - 1),
-        axis=1,
-    )
-    assert not np.any(final_in_bounds)
+    assert len(final_block.stack_index_zyx) == 0
+    assert not final_block.region_spans
 
     z_index, _, _ = np.indices(shape, dtype=float)
     channels = {"constant": np.ones(shape), "z-gradient": z_index}
@@ -195,9 +188,10 @@ def test_streaming_only_selection_does_not_sort_or_buffer(monkeypatch):
     regions = _two_cell_regions(sampling_spacing=0.25)
 
     def forbidden(*args, **kwargs):
-        raise AssertionError("quantile code must not run")
+        raise AssertionError("buffered quantile/mode code must not run")
 
     monkeypatch.setattr(statistics, "weighted_quantiles", forbidden)
+    monkeypatch.setattr(statistics.StreamingReducer, "buffered_samples", forbidden)
     measured = intensity.measure(
         np.ones((12, 12, 12)),
         regions,
@@ -334,6 +328,55 @@ def test_streaming_weighted_moments_are_stable_across_updates():
     assert reducer.weighted_sum == pytest.approx(10)
     assert reducer.minimum == 1
     assert reducer.maximum == 3
+
+
+@pytest.mark.parametrize(
+    ("values", "weights"),
+    [
+        ([0, 0, 1, 1, 2, 2], [1, 3, 2, 5, 1, 7]),
+        ([0, 1, 2, 3], [1e-12, 1e12, 3e-7, 5e6]),
+        ([4, 3, 2, 1, 0], [1, 1, 1, 1, 1]),
+    ],
+)
+def test_weighted_selection_matches_stable_reference(values, weights):
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    quantiles = (0.25, 0.5, 0.75)
+
+    expected = statistics._stable_weighted_quantiles(values, weights, quantiles)
+    actual = statistics.weighted_quantiles(values, weights, quantiles)
+
+    assert actual == expected
+
+
+@pytest.mark.parametrize("offset", [-np.spacing(0.5), 0.0, np.spacing(0.5)])
+def test_weighted_selection_preserves_exact_and_near_thresholds(offset):
+    values = np.asarray([0.0, 1.0, 2.0])
+    weights = np.asarray([0.5 + offset, 0.5 - offset, 1.0])
+    quantiles = (0.25, 0.5, 0.75)
+
+    expected = statistics._stable_weighted_quantiles(values, weights, quantiles)
+    actual = statistics.weighted_quantiles(values, weights, quantiles)
+
+    assert actual == expected
+
+
+def test_ambiguous_weighted_selection_uses_stable_fallback(monkeypatch):
+    values = np.asarray([0.0, 1.0, 2.0])
+    weights = np.asarray([0.5, 0.5, 1.0])
+    original = statistics._stable_weighted_quantiles
+    fallback_calls = 0
+
+    def tracked_fallback(values, weights, quantiles):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return original(values, weights, quantiles)
+
+    monkeypatch.setattr(statistics, "_stable_weighted_quantiles", tracked_fallback)
+    result = statistics.weighted_quantiles(values, weights, (0.25, 0.5, 0.75))
+
+    assert result == {0.25: 0.0, 0.5: 1.0, 0.75: 2.0}
+    assert fallback_calls == 1
 
 
 def test_mode_constant_tie_nonfinite_and_validation():
