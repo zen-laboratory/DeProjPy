@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections import deque
-
 import numpy as np
+from numba import njit
 
 
 def _cross_2d(first: np.ndarray, second: np.ndarray) -> float:
@@ -237,14 +236,6 @@ def triangulate_polygon(polygon_uv: np.ndarray) -> np.ndarray:
     return np.asarray(triangles, dtype=float)
 
 
-def _triangle_area(triangle_uv: np.ndarray) -> float:
-    """Return the positive area of a counter-clockwise triangle."""
-    return 0.5 * _cross_2d(
-        triangle_uv[1] - triangle_uv[0],
-        triangle_uv[2] - triangle_uv[0],
-    )
-
-
 def subdivide_triangles(
     triangles_uv: np.ndarray,
     maximum_edge_length: float,
@@ -260,40 +251,92 @@ def subdivide_triangles(
     if not np.isfinite(maximum_edge_length) or maximum_edge_length <= 0:
         raise ValueError("maximum_edge_length must be positive and finite")
 
-    pending = deque(np.asarray(triangle, dtype=float) for triangle in triangles_uv)
-    accepted: list[np.ndarray] = []
+    triangles = np.asarray(triangles_uv, dtype=float)
+    if len(triangles) == 0:
+        return np.empty(0, dtype=float)
     comparison_tolerance = 32.0 * np.finfo(float).eps
+    edge_limit = maximum_edge_length * (1.0 + comparison_tolerance)
+    return _subdivide_triangles(triangles, edge_limit)
 
-    while pending:
-        triangle_uv = pending.popleft()
-        edge_pairs = ((0, 1), (1, 2), (2, 0))
-        edge_lengths = np.asarray(
-            [np.linalg.norm(triangle_uv[end] - triangle_uv[start]) for start, end in edge_pairs]
-        )
-        longest_edge_index = int(np.argmax(edge_lengths))
-        if edge_lengths[longest_edge_index] <= maximum_edge_length * (
-            1.0 + comparison_tolerance
-        ):
-            accepted.append(triangle_uv)
+
+@njit(cache=True)
+def _subdivide_triangles(triangles: np.ndarray, edge_limit: float) -> np.ndarray:
+    """Process triangles in queue order using contiguous numeric buffers."""
+    capacity = max(len(triangles), 16)
+    pending = np.empty((capacity, 3, 2), dtype=np.float64)
+    pending[:len(triangles)] = triangles
+    accepted = np.empty_like(pending)
+    read = 0
+    write = len(triangles)
+    count = 0
+
+    while read < write:
+        triangle = pending[read]
+        read += 1
+
+        # Scalar edge lengths avoid allocating three tiny arrays and calling
+        # general-purpose NumPy reductions for every triangle in the queue.
+        longest_edge = 0
+        longest_length = -1.0
+        for start in range(3):
+            end = (start + 1) % 3
+            dx = triangle[end, 0] - triangle[start, 0]
+            dy = triangle[end, 1] - triangle[start, 1]
+            squared_length = dx * dx + dy * dy
+            if squared_length > longest_length:
+                longest_edge = start
+                longest_length = squared_length
+
+        if np.sqrt(longest_length) <= edge_limit:
+            if count == len(accepted):
+                larger = np.empty((2 * count, 3, 2), dtype=np.float64)
+                larger[:count] = accepted
+                accepted = larger
+            accepted[count] = triangle
+            count += 1
             continue
 
-        start_index, end_index = edge_pairs[longest_edge_index]
-        opposite_index = 3 - start_index - end_index
-        midpoint_uv = 0.5 * (triangle_uv[start_index] + triangle_uv[end_index])
+        start = longest_edge
+        end = (start + 1) % 3
+        opposite = 3 - start - end
+        midpoint_x = 0.5 * (triangle[start, 0] + triangle[end, 0])
+        midpoint_y = 0.5 * (triangle[start, 1] + triangle[end, 1])
 
-        first_child = np.asarray(
-            [triangle_uv[start_index], midpoint_uv, triangle_uv[opposite_index]]
-        )
-        second_child = np.asarray(
-            [midpoint_uv, triangle_uv[end_index], triangle_uv[opposite_index]]
-        )
-        if _triangle_area(first_child) < 0:
-            first_child[[1, 2]] = first_child[[2, 1]]
-        if _triangle_area(second_child) < 0:
-            second_child[[1, 2]] = second_child[[2, 1]]
-        pending.extend((first_child, second_child))
+        # Reclaim the consumed queue prefix before growing its capacity.
+        # Keep the parent view alive while writing its two children.
+        if write + 2 > len(pending):
+            remaining = write - read
+            capacity = len(pending)
+            if remaining + 2 > capacity // 2:
+                capacity *= 2
+            compacted = np.empty((capacity, 3, 2), dtype=np.float64)
+            compacted[:remaining] = pending[read:write]
+            pending = compacted
+            read = 0
+            write = remaining
 
-    return np.asarray(accepted, dtype=float)
+        pending[write, 0] = triangle[start]
+        pending[write, 1, 0] = midpoint_x
+        pending[write, 1, 1] = midpoint_y
+        pending[write, 2] = triangle[opposite]
+        pending[write + 1, 0] = pending[write, 1]
+        pending[write + 1, 1] = triangle[end]
+        pending[write + 1, 2] = triangle[opposite]
+
+        # Keep the existing counter-clockwise child orientation convention.
+        for index in range(write, write + 2):
+            child = pending[index]
+            dx1 = child[1, 0] - child[0, 0]
+            dy1 = child[1, 1] - child[0, 1]
+            dx2 = child[2, 0] - child[0, 0]
+            dy2 = child[2, 1] - child[0, 1]
+            if dx1 * dy2 - dy1 * dx2 < 0:
+                x, y = child[1, 0], child[1, 1]
+                child[1] = child[2]
+                child[2, 0], child[2, 1] = x, y
+        write += 2
+
+    return accepted[:count].copy()
 
 
 def build_lateral_quadrature(
@@ -323,9 +366,11 @@ def build_lateral_quadrature(
     # One centroid with the exact subtriangle area is first-moment exact, unlike
     # arbitrary point clouds whose weights merely sum to polygon area.
     points_uv = np.mean(subtriangles_uv, axis=1)
-    area_weights = np.asarray(
-        [_triangle_area(triangle_uv) for triangle_uv in subtriangles_uv],
-        dtype=float,
+    first_edges = subtriangles_uv[:, 1] - subtriangles_uv[:, 0]
+    second_edges = subtriangles_uv[:, 2] - subtriangles_uv[:, 0]
+    area_weights = 0.5 * (
+        first_edges[:, 0] * second_edges[:, 1]
+        - first_edges[:, 1] * second_edges[:, 0]
     )
     return points_uv, area_weights, cleaned_polygon_uv
 
