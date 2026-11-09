@@ -106,6 +106,36 @@ def test_polygon_cleanup_handles_closing_duplicates_collinear_and_orientation():
         clean_polygon(np.asarray([[0, 0], [2, 2], [0, 2], [2, 0]], dtype=float))
 
 
+@pytest.mark.parametrize(
+    "polygon",
+    [
+        # A nonadjacent vertex touches the first edge without crossing it.
+        [[0, 0], [2, 0], [1, 1], [1, 0], [0, 1]],
+        # Two nonadjacent horizontal edges overlap over a finite interval.
+        [[0, 0], [3, 0], [3, 2], [1, 2], [1, 0], [2, 0], [2, 1], [0, 1]],
+    ],
+)
+def test_polygon_cleanup_rejects_nonadjacent_contacts(polygon):
+    with pytest.raises(ValueError, match="touches a nonadjacent edge"):
+        clean_polygon(np.asarray(polygon, dtype=float))
+
+
+def test_subdivision_preserves_breadth_first_order_when_longest_edges_tie():
+    triangle = np.asarray([[[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]])
+
+    # The last two parent edges tie. Strict argmax semantics select the earlier
+    # edge, and queue ordering leaves its accepted sibling first in the output.
+    subdivided = subdivide_triangles(triangle, maximum_edge_length=1.1)
+    expected = np.asarray(
+        [
+            [[1.0, 0.0], [0.75, 0.5], [0.0, 0.0]],
+            [[0.5, 1.0], [0.25, 0.5], [0.75, 0.5]],
+            [[0.25, 0.5], [0.0, 0.0], [0.75, 0.5]],
+        ]
+    )
+    np.testing.assert_array_equal(subdivided, expected)
+
+
 def test_depth_midpoints_span_exact_signed_interval_and_integrate_affine_depth():
     points, widths = depth_midpoint_quadrature(-1.25, 4.0, 2.0)
 

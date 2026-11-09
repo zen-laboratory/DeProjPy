@@ -33,64 +33,105 @@ def _geometry_tolerances(points_uv: np.ndarray) -> tuple[float, float]:
     return length_tolerance, area_tolerance
 
 
-def _segments_intersect(
-    first_start_uv: np.ndarray,
-    first_end_uv: np.ndarray,
-    second_start_uv: np.ndarray,
-    second_end_uv: np.ndarray,
+@njit(cache=True)
+def _has_nonadjacent_edge_intersection(
+    points_uv: np.ndarray,
     area_tolerance: float,
 ) -> bool:
-    """Return whether two closed 2-D segments intersect within tolerance."""
-    first_direction = first_end_uv - first_start_uv
-    second_direction = second_end_uv - second_start_uv
-    orientations = (
-        _cross_2d(first_direction, second_start_uv - first_start_uv),
-        _cross_2d(first_direction, second_end_uv - first_start_uv),
-        _cross_2d(second_direction, first_start_uv - second_start_uv),
-        _cross_2d(second_direction, first_end_uv - second_start_uv),
-    )
+    """Scan nonadjacent edge pairs without returning to Python per pair."""
+    count = len(points_uv)
+    squared_area_tolerance = area_tolerance * area_tolerance
+    machine_epsilon = np.finfo(np.float64).eps
 
-    # Crossing or touching segments must have no same-side endpoint pair and
-    # overlapping bounding boxes. This also catches a nonadjacent vertex that
-    # lands on an edge, which would make the polygon non-simple.
-    separated_by_first_line = orientations[0] * orientations[1] > area_tolerance**2
-    separated_by_second_line = orientations[2] * orientations[3] > area_tolerance**2
-    if separated_by_first_line or separated_by_second_line:
-        return False
-    first_min = np.minimum(first_start_uv, first_end_uv)
-    first_max = np.maximum(first_start_uv, first_end_uv)
-    second_min = np.minimum(second_start_uv, second_end_uv)
-    second_max = np.maximum(second_start_uv, second_end_uv)
-    coordinate_scale = max(
-        float(np.max(np.abs([first_start_uv, first_end_uv, second_start_uv, second_end_uv]))),
-        np.finfo(float).eps,
-    )
-    coordinate_tolerance = 64.0 * np.finfo(float).eps * coordinate_scale
-    return bool(
-        np.all(first_max + coordinate_tolerance >= second_min)
-        and np.all(second_max + coordinate_tolerance >= first_min)
-    )
+    for first_index in range(count):
+        first_next = (first_index + 1) % count
+        first_start_x = points_uv[first_index, 0]
+        first_start_y = points_uv[first_index, 1]
+        first_end_x = points_uv[first_next, 0]
+        first_end_y = points_uv[first_next, 1]
+        first_dx = first_end_x - first_start_x
+        first_dy = first_end_y - first_start_y
+
+        for second_index in range(first_index + 1, count):
+            second_next = (second_index + 1) % count
+            # Adjacent edges legitimately share one endpoint. All other
+            # crossing, touching, and collinear-overlap cases are invalid.
+            if first_index == second_index or first_index == second_next:
+                continue
+            if first_next == second_index or first_next == second_next:
+                continue
+
+            second_start_x = points_uv[second_index, 0]
+            second_start_y = points_uv[second_index, 1]
+            second_end_x = points_uv[second_next, 0]
+            second_end_y = points_uv[second_next, 1]
+            second_dx = second_end_x - second_start_x
+            second_dy = second_end_y - second_start_y
+
+            first_start_to_second_start_x = second_start_x - first_start_x
+            first_start_to_second_start_y = second_start_y - first_start_y
+            first_start_to_second_end_x = second_end_x - first_start_x
+            first_start_to_second_end_y = second_end_y - first_start_y
+            second_start_to_first_start_x = first_start_x - second_start_x
+            second_start_to_first_start_y = first_start_y - second_start_y
+            second_start_to_first_end_x = first_end_x - second_start_x
+            second_start_to_first_end_y = first_end_y - second_start_y
+
+            first_orientation_start = (
+                first_dx * first_start_to_second_start_y
+                - first_dy * first_start_to_second_start_x
+            )
+            first_orientation_end = (
+                first_dx * first_start_to_second_end_y
+                - first_dy * first_start_to_second_end_x
+            )
+            second_orientation_start = (
+                second_dx * second_start_to_first_start_y
+                - second_dy * second_start_to_first_start_x
+            )
+            second_orientation_end = (
+                second_dx * second_start_to_first_end_y
+                - second_dy * second_start_to_first_end_x
+            )
+            if (
+                first_orientation_start * first_orientation_end
+                > squared_area_tolerance
+                or second_orientation_start * second_orientation_end
+                > squared_area_tolerance
+            ):
+                continue
+
+            coordinate_scale = max(
+                abs(first_start_x),
+                abs(first_start_y),
+                abs(first_end_x),
+                abs(first_end_y),
+                abs(second_start_x),
+                abs(second_start_y),
+                abs(second_end_x),
+                abs(second_end_y),
+                machine_epsilon,
+            )
+            coordinate_tolerance = 64.0 * machine_epsilon * coordinate_scale
+            if (
+                max(first_start_x, first_end_x) + coordinate_tolerance
+                >= min(second_start_x, second_end_x)
+                and max(second_start_x, second_end_x) + coordinate_tolerance
+                >= min(first_start_x, first_end_x)
+                and max(first_start_y, first_end_y) + coordinate_tolerance
+                >= min(second_start_y, second_end_y)
+                and max(second_start_y, second_end_y) + coordinate_tolerance
+                >= min(first_start_y, first_end_y)
+            ):
+                return True
+
+    return False
 
 
 def _validate_simple_polygon(points_uv: np.ndarray, area_tolerance: float) -> None:
     """Reject crossings or contacts between nonadjacent polygon edges."""
-    count = len(points_uv)
-    for first_index in range(count):
-        first_next = (first_index + 1) % count
-        for second_index in range(first_index + 1, count):
-            second_next = (second_index + 1) % count
-            if first_index in {second_index, second_next}:
-                continue
-            if first_next in {second_index, second_next}:
-                continue
-            if _segments_intersect(
-                points_uv[first_index],
-                points_uv[first_next],
-                points_uv[second_index],
-                points_uv[second_next],
-                area_tolerance,
-            ):
-                raise ValueError("polygon is self-intersecting or touches a nonadjacent edge")
+    if _has_nonadjacent_edge_intersection(points_uv, area_tolerance):
+        raise ValueError("polygon is self-intersecting or touches a nonadjacent edge")
 
 
 def clean_polygon(polygon_uv: np.ndarray) -> np.ndarray:
@@ -168,18 +209,89 @@ def clean_polygon(polygon_uv: np.ndarray) -> np.ndarray:
     return cleaned
 
 
-def _point_in_triangle(
-    point_uv: np.ndarray,
-    triangle_uv: np.ndarray,
+@njit(cache=True)
+def _triangulate_cleaned_kernel(
+    cleaned_uv: np.ndarray,
     area_tolerance: float,
-) -> bool:
-    """Return whether a point lies in/on a counter-clockwise triangle."""
-    for edge_index in range(3):
-        start_uv = triangle_uv[edge_index]
-        end_uv = triangle_uv[(edge_index + 1) % 3]
-        if _cross_2d(end_uv - start_uv, point_uv - start_uv) < -area_tolerance:
-            return False
-    return True
+) -> tuple[np.ndarray, bool]:
+    """Clip the first valid ear on each pass, preserving deterministic order."""
+    vertex_count = len(cleaned_uv)
+    remaining = np.arange(vertex_count)
+    remaining_count = vertex_count
+    triangles = np.empty((vertex_count - 2, 3, 2), dtype=np.float64)
+    triangle_count = 0
+
+    while remaining_count > 3:
+        ear_position = -1
+        for position in range(remaining_count):
+            previous_index = remaining[(position - 1) % remaining_count]
+            current_index = remaining[position]
+            next_index = remaining[(position + 1) % remaining_count]
+
+            first_dx = cleaned_uv[current_index, 0] - cleaned_uv[previous_index, 0]
+            first_dy = cleaned_uv[current_index, 1] - cleaned_uv[previous_index, 1]
+            second_dx = cleaned_uv[next_index, 0] - cleaned_uv[current_index, 0]
+            second_dy = cleaned_uv[next_index, 1] - cleaned_uv[current_index, 1]
+            if first_dx * second_dy - first_dy * second_dx <= area_tolerance:
+                continue
+
+            contains_vertex = False
+            for candidate_position in range(remaining_count):
+                candidate_index = remaining[candidate_position]
+                if (
+                    candidate_index == previous_index
+                    or candidate_index == current_index
+                    or candidate_index == next_index
+                ):
+                    continue
+
+                point_x = cleaned_uv[candidate_index, 0]
+                point_y = cleaned_uv[candidate_index, 1]
+                triangle_indices = (previous_index, current_index, next_index)
+                inside = True
+                for edge_index in range(3):
+                    start_index = triangle_indices[edge_index]
+                    end_index = triangle_indices[(edge_index + 1) % 3]
+                    edge_dx = cleaned_uv[end_index, 0] - cleaned_uv[start_index, 0]
+                    edge_dy = cleaned_uv[end_index, 1] - cleaned_uv[start_index, 1]
+                    point_dx = point_x - cleaned_uv[start_index, 0]
+                    point_dy = point_y - cleaned_uv[start_index, 1]
+                    if edge_dx * point_dy - edge_dy * point_dx < -area_tolerance:
+                        inside = False
+                        break
+                if inside:
+                    contains_vertex = True
+                    break
+
+            if not contains_vertex:
+                ear_position = position
+                triangles[triangle_count, 0] = cleaned_uv[previous_index]
+                triangles[triangle_count, 1] = cleaned_uv[current_index]
+                triangles[triangle_count, 2] = cleaned_uv[next_index]
+                triangle_count += 1
+                break
+
+        if ear_position < 0:
+            return triangles[:triangle_count], False
+
+        for position in range(ear_position, remaining_count - 1):
+            remaining[position] = remaining[position + 1]
+        remaining_count -= 1
+
+    for position in range(3):
+        triangles[triangle_count, position] = cleaned_uv[remaining[position]]
+    return triangles, True
+
+
+def _triangulate_cleaned_polygon(cleaned_uv: np.ndarray) -> np.ndarray:
+    """Triangulate a normalized polygon using tolerances from that polygon."""
+    _, area_tolerance = _geometry_tolerances(cleaned_uv)
+    triangles, succeeded = _triangulate_cleaned_kernel(cleaned_uv, area_tolerance)
+    if not succeeded:
+        raise ValueError(
+            "polygon is self-intersecting or numerically unsuitable for ear clipping"
+        )
+    return triangles
 
 
 def triangulate_polygon(polygon_uv: np.ndarray) -> np.ndarray:
@@ -198,42 +310,7 @@ def triangulate_polygon(polygon_uv: np.ndarray) -> np.ndarray:
         counter-clockwise and triangle areas sum to polygon area.
     """
     cleaned_uv = clean_polygon(polygon_uv)
-    _, area_tolerance = _geometry_tolerances(cleaned_uv)
-    remaining = list(range(len(cleaned_uv)))
-    triangles: list[np.ndarray] = []
-
-    while len(remaining) > 3:
-        ear_found = False
-        for position, current_index in enumerate(remaining):
-            previous_index = remaining[position - 1]
-            next_index = remaining[(position + 1) % len(remaining)]
-            triangle_uv = cleaned_uv[[previous_index, current_index, next_index]]
-
-            first_edge = triangle_uv[1] - triangle_uv[0]
-            second_edge = triangle_uv[2] - triangle_uv[1]
-            if _cross_2d(first_edge, second_edge) <= area_tolerance:
-                continue
-
-            contains_vertex = any(
-                _point_in_triangle(cleaned_uv[index], triangle_uv, area_tolerance)
-                for index in remaining
-                if index not in {previous_index, current_index, next_index}
-            )
-            if contains_vertex:
-                continue
-
-            triangles.append(triangle_uv)
-            del remaining[position]
-            ear_found = True
-            break
-
-        if not ear_found:
-            raise ValueError(
-                "polygon is self-intersecting or numerically unsuitable for ear clipping"
-            )
-
-    triangles.append(cleaned_uv[remaining])
-    return np.asarray(triangles, dtype=float)
+    return _triangulate_cleaned_polygon(cleaned_uv)
 
 
 def subdivide_triangles(
@@ -256,16 +333,23 @@ def subdivide_triangles(
         return np.empty(0, dtype=float)
     comparison_tolerance = 32.0 * np.finfo(float).eps
     edge_limit = maximum_edge_length * (1.0 + comparison_tolerance)
-    return _subdivide_triangles(triangles, edge_limit)
+    accepted, _, _ = _subdivide_triangles(triangles, edge_limit, emit_triangles=True)
+    return accepted
 
 
 @njit(cache=True)
-def _subdivide_triangles(triangles: np.ndarray, edge_limit: float) -> np.ndarray:
-    """Process triangles in queue order using contiguous numeric buffers."""
+def _subdivide_triangles(
+    triangles: np.ndarray,
+    edge_limit: float,
+    emit_triangles: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Traverse one breadth-first queue and emit the requested compact rule."""
     capacity = max(len(triangles), 16)
     pending = np.empty((capacity, 3, 2), dtype=np.float64)
     pending[:len(triangles)] = triangles
-    accepted = np.empty_like(pending)
+    accepted = np.empty_like(pending) if emit_triangles else np.empty((0, 3, 2))
+    centroids = np.empty((0, 2)) if emit_triangles else np.empty((capacity, 2))
+    area_weights = np.empty(0) if emit_triangles else np.empty(capacity)
     read = 0
     write = len(triangles)
     count = 0
@@ -288,11 +372,36 @@ def _subdivide_triangles(triangles: np.ndarray, edge_limit: float) -> np.ndarray
                 longest_length = squared_length
 
         if np.sqrt(longest_length) <= edge_limit:
-            if count == len(accepted):
-                larger = np.empty((2 * count, 3, 2), dtype=np.float64)
-                larger[:count] = accepted
-                accepted = larger
-            accepted[count] = triangle
+            if emit_triangles:
+                if count == len(accepted):
+                    larger = np.empty((2 * count, 3, 2), dtype=np.float64)
+                    larger[:count] = accepted
+                    accepted = larger
+                accepted[count] = triangle
+            else:
+                if count == len(centroids):
+                    larger_centroids = np.empty((2 * count, 2), dtype=np.float64)
+                    larger_weights = np.empty(2 * count, dtype=np.float64)
+                    larger_centroids[:count] = centroids
+                    larger_weights[:count] = area_weights
+                    centroids = larger_centroids
+                    area_weights = larger_weights
+
+                # The builder needs only the first-moment-exact centroid and
+                # signed physical area, so accepted triangles need not survive.
+                centroids[count, 0] = (
+                    triangle[0, 0] + triangle[1, 0] + triangle[2, 0]
+                ) / 3.0
+                centroids[count, 1] = (
+                    triangle[0, 1] + triangle[1, 1] + triangle[2, 1]
+                ) / 3.0
+                first_dx = triangle[1, 0] - triangle[0, 0]
+                first_dy = triangle[1, 1] - triangle[0, 1]
+                second_dx = triangle[2, 0] - triangle[0, 0]
+                second_dy = triangle[2, 1] - triangle[0, 1]
+                area_weights[count] = 0.5 * (
+                    first_dx * second_dy - first_dy * second_dx
+                )
             count += 1
             continue
 
@@ -336,7 +445,29 @@ def _subdivide_triangles(triangles: np.ndarray, edge_limit: float) -> np.ndarray
                 child[2, 0], child[2, 1] = x, y
         write += 2
 
-    return accepted[:count].copy()
+    return (
+        accepted[:count].copy(),
+        centroids[:count].copy(),
+        area_weights[:count].copy(),
+    )
+
+
+def _subdivide_to_quadrature(
+    triangles_uv: np.ndarray,
+    maximum_edge_length: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return accepted centroids and areas without storing accepted triangles."""
+    if not np.isfinite(maximum_edge_length) or maximum_edge_length <= 0:
+        raise ValueError("maximum_edge_length must be positive and finite")
+
+    comparison_tolerance = 32.0 * np.finfo(float).eps
+    edge_limit = maximum_edge_length * (1.0 + comparison_tolerance)
+    _, centroids, area_weights = _subdivide_triangles(
+        triangles_uv,
+        edge_limit,
+        emit_triangles=False,
+    )
+    return centroids, area_weights
 
 
 def build_lateral_quadrature(
@@ -360,17 +491,13 @@ def build_lateral_quadrature(
     # Normalize and triangulate once per region; the resulting centroid/area
     # rule is compact and can be reused for every aligned image channel.
     cleaned_polygon_uv = clean_polygon(polygon_uv)
-    triangles_uv = triangulate_polygon(cleaned_polygon_uv)
-    subtriangles_uv = subdivide_triangles(triangles_uv, sampling_spacing)
+    triangles_uv = _triangulate_cleaned_polygon(cleaned_polygon_uv)
 
-    # One centroid with the exact subtriangle area is first-moment exact, unlike
-    # arbitrary point clouds whose weights merely sum to polygon area.
-    points_uv = np.mean(subtriangles_uv, axis=1)
-    first_edges = subtriangles_uv[:, 1] - subtriangles_uv[:, 0]
-    second_edges = subtriangles_uv[:, 2] - subtriangles_uv[:, 0]
-    area_weights = 0.5 * (
-        first_edges[:, 0] * second_edges[:, 1]
-        - first_edges[:, 1] * second_edges[:, 0]
+    # Emit the reusable centroid rule directly; retaining millions of accepted
+    # triangles would add a temporary six-float record for every sample.
+    points_uv, area_weights = _subdivide_to_quadrature(
+        triangles_uv,
+        sampling_spacing,
     )
     return points_uv, area_weights, cleaned_polygon_uv
 
