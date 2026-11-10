@@ -1,468 +1,170 @@
 # DeProjPy cookbook
 
-This cookbook collects short copy-pastable recipes for common DeProjPy workflows.
-The README shows the main story; this file is meant as a practical reference when
-you want to adapt one piece of the workflow.
+Start with the [README quick start](../README.md#quick-start) for a first run.
+The recipes below show how to inspect a result, join measurements, compare
+distances, and check intensity coverage.
 
-Most recipes assume the repository sample files:
+- [DeProjPy cookbook](#deprojpy-cookbook)
+  - [Prepare a sample result](#prepare-a-sample-result)
+  - [Inspect geometry and quantify the projection error](#inspect-geometry-and-quantify-the-projection-error)
+  - [Join cell features to another table](#join-cell-features-to-another-table)
+  - [Compare distances and draw a graph path](#compare-distances-and-draw-a-graph-path)
+  - [Preview prisms and measure fluorescence](#preview-prisms-and-measure-fluorescence)
 
-```text
-samples/Segmentation-2.tif
-samples/HeightMap-2.tif
-samples/Labels-2.tif
-```
+## Prepare a sample result
 
-and the same physical calibration used in the examples:
-
-```python
-PIXEL_SIZE = 0.183
-VOXEL_DEPTH = 1.0
-UNITS = "µm"
-INVERT_Z = True
-```
-
-## 1. Load data
-
-### Mask + height map
-
-Use this when your segmentation is a DeProj-style mask: cell interiors are
-non-zero and cell borders/ridges are zero.
+Run this from the repository root. Later recipes reuse `result` and `cells`.
 
 ```python
 import deprojpy as dp
-
-mask, heightmap = dp.load_tiff_pair(
-    "samples/Segmentation-2.tif",
-    "samples/HeightMap-2.tif",
-)
-```
-
-### Labels + height map
-
-Use this when your segmentation is an integer label image: each cell has a unique
-label and background is zero. This workflow requires `labelimage-tools`.
-
-```python
-import deprojpy as dp
+from deprojpy import plotting
 
 labels, heightmap = dp.load_label_heightmap_pair(
-    "samples/Labels-2.tif",
-    "samples/HeightMap-2.tif",
+    "samples/Labels-2.tif", "samples/HeightMap-2.tif"
 )
+sample_scale = dict(pixel_size=0.183, voxel_depth=1.0, units="µm", invert_z=True)
+result = dp.from_labels(labels, heightmap, **sample_scale)
+cells = result.to_dataframe()
 ```
 
-## 2. Run deprojection
-
-### Deproject a mask
+To run the same recipes on the bundled ridge mask, replace the input and
+deprojection calls with these:
 
 ```python
-result = dp.from_heightmap(mask, heightmap,
-    pixel_size=PIXEL_SIZE, voxel_depth=VOXEL_DEPTH, units=UNITS,
-    invert_z=INVERT_Z, inpaint_zeros=True, prune_zeros=True)
+mask, heightmap = dp.load_tiff_pair(
+    "samples/Segmentation-2.tif", "samples/HeightMap-2.tif"
+)
+result = dp.from_mask(mask, heightmap, **sample_scale)
+cells = result.to_dataframe()
 ```
 
-### Deproject labels
+For your own images, use their calibration and height-map orientation. If
+your labels are separated by background, pass `drop_border_cells=False`
+and inspect cells cut off by the field of view. See the
+[input guide](deprojection_inputs.md) for details on border filtering and
+interpreting contact information.
+
+## Inspect geometry and quantify the projection error
+
+Check that cell locations agree with the height map and inspect the lifted
+contours before comparing measurements across a curved region.
 
 ```python
-result = dp.from_labels(labels, heightmap,
-    pixel_size=PIXEL_SIZE, voxel_depth=VOXEL_DEPTH, units=UNITS,
-    invert_z=INVERT_Z, inpaint_zeros=True, prune_zeros=True)
+fig, ax = plotting.plot_heightmap_with_centers(heightmap, result)
+fig, ax = plotting.plot_3d_boundaries(result, "area")
 ```
 
-### Keep border cells in a label workflow
-
-Border cells are commonly dropped in quantitative workflows, but sometimes it is
-useful to keep them for visual diagnostics.
+Map the relative difference between surface-corrected and projected area.
+Positive values mark cells where the surface-corrected area is larger.
 
 ```python
-result = dp.from_labels(labels, heightmap,
-    pixel_size=PIXEL_SIZE, voxel_depth=VOXEL_DEPTH, units=UNITS,
-    invert_z=INVERT_Z, drop_border_cells=False)
+fig, ax = plotting.plot_relative_error_map(result, "area")
 ```
 
-## 3. Export measurements
+![Relative area correction across the sample tissue](images/relative_area_error.jpg)
 
-Convert the result to a `pandas.DataFrame` or write it directly to CSV.
+Change `"area"` to `"perimeter"` for the equivalent perimeter diagnostic.
+For a measured feature such as eccentricity, use
+`plotting.plot_feature_map(result, "eccentricity")`. The
+[plot gallery script](../examples/02_plot_gallery.py) shows histograms,
+curvature maps, and side-by-side feature maps.
+
+## Join cell features to another table
+
+For label input, join by `source_label` to keep the association with the
+original segmentation, even if some cells were filtered out. Here
+`other_features.csv` has one row per original label in this image.
 
 ```python
-df = result.to_dataframe()
-result.to_csv("measurements.csv")
+import pandas as pd
+
+other = pd.read_csv("other_features.csv")
+combined = cells.merge(other, on="source_label", how="left", validate="one_to_one")
+combined.to_csv("combined_cell_features.csv", index=False)
 ```
 
-The result uses geometric coordinates in physical units. `cell.center` is the mean of simplified boundary vertices in `(x, y, z)` order. The independently computed `cell.surface_centroid` weights all footprint pixels by reconstructed surface area and can lie off the surface. Label inputs use the original label pixels; binary masks use the dilated boundary-tracing component, so neighboring footprints may share ridge pixels. 
+Use the left join to retain every deprojected cell. For multiple images,
+include an image identifier in the join because label IDs can repeat.
+To export geometry alone, use `result.to_csv("cell_geometry.csv")`.
 
-```python
-centers_xyz = df[["xc", "yc", "zc"]].to_numpy()
-surface_centers_xyz = df[
-    ["surface_centroid_x", "surface_centroid_y", "surface_centroid_z"]
-].to_numpy()
-```
+## Compare distances and draw a graph path
 
-## 4. Plot basic diagnostics
-
-### Show detected mask objects
-
-```python
-fig, ax = dp.plotting.plot_mask_objects(mask)
-```
-
-<p align="center">
-  <img src="../examples/output/plots/mask_objects.png" width="70%">
-</p>
-
-### Show the height map with cell centers
-
-```python
-fig, ax = dp.plotting.plot_heightmap_with_centers(result)
-```
-
-<p align="center">
-  <img src="../examples/output/plots/heightmap_centers.png" width="70%">
-</p>
-
-### Plot 3D boundaries
-
-```python
-fig, ax = dp.plotting.plot_3d_boundaries(result, "area")
-ax.view_init(azim=115, elev=1)
-```
-
-<p align="center">
-  <img src="../examples/output/plots/boundaries_3d.png" width="70%">
-</p>
-
-## 5. Plot cell features
-
-### Area map
-
-```python
-fig, ax = dp.plotting.plot_feature_map(result, "area", cmap="viridis")
-```
-
-<p align="center">
-  <img src="../examples/output/plots/area_map.png" width="70%">
-</p>
-
-### Neighbor count map
-
-```python
-fig, ax = dp.plotting.plot_feature_map(result, "n_neighbors",
-    cmap="tab10", edgecolor="k", linewidth=0.4)
-```
-
-<p align="center">
-  <img src="../examples/output/plots/neighbor_map.png" width="70%">
-</p>
-
-### Multiple feature maps
-
-```python
-import matplotlib.pyplot as plt
-
-fig, axes = plt.subplots(1, 2, figsize=(9, 4))
-dp.plotting.plot_feature_map(result, "eccentricity", ax=axes[0],
-    title="Eccentricity", edgecolor="white", linewidth=0.1)
-dp.plotting.plot_feature_map(result, "n_neighbors", ax=axes[1],
-    title="Neighbor count", cmap="tab10", edgecolor="k", linewidth=0.4)
-```
-
-<p align="center">
-  <img src="../examples/output/plots/custom_feature_maps.png" width="80%">
-</p>
-
-### Feature histograms
-
-```python
-fig, axes = dp.plotting.plot_feature_histograms(result,
-    features=("area", "perimeter", "eccentricity", "n_neighbors"))
-```
-
-<p align="center">
-  <img src="../examples/output/plots/feature_histograms.png" width="80%">
-</p>
-
-## 6. Plot deprojection corrections
-
-A useful sanity check is to compare deprojected measurements to their projected
-2D counterparts. Large values indicate regions where 2D measurements would miss
-surface geometry.
-
-```python
-fig, axes = plt.subplots(2, 2, figsize=(10, 8), layout="constrained")
-dp.plotting.plot_feature_map(result, "area_error", ax=axes[0, 0],
-    title="Absolute area error")
-dp.plotting.plot_feature_map(result, "perimeter_error", ax=axes[0, 1],
-    title="Absolute perimeter error")
-dp.plotting.plot_relative_error_map(result, "area", ax=axes[1, 0],
-    title="Relative area error")
-dp.plotting.plot_relative_error_map(result, "perimeter", ax=axes[1, 1],
-    title="Relative perimeter error")
-```
-
-<p align="center">
-  <img src="../examples/output/plots/error_maps_2x2.png" width="80%">
-</p>
-
-## 7. Surface distances
-
-DeProjPy supports two surface-distance ideas:
-
-- **straight surface distance**: draw a straight segment in xy, lift it onto the
-  surface, and measure the 3D polyline length;
-- **graph geodesic distance**: build a sparse surface graph and compute shortest
-  paths on that graph. This is an approximation to the continuous geodesic.
-
-### Build calculators
-
-Use `from_result(...)` for the prepared height-map surface.
-
-```python
-from deprojpy.surface_distance import SurfaceDistanceCalculator, SurfaceGraph
-
-heightmap_calc = SurfaceDistanceCalculator.from_result(result, heightmap,
-    prepared=False, invert_z=INVERT_Z, inpaint_zeros=True, prune_zeros=True)
-```
-
-Use `from_cell_boundaries(...)` for the fitted surface represented by the
-deprojected cell contours. This is usually the better choice for plotting paths
-over deprojected boundaries.
-
-```python
-boundary_calc = SurfaceDistanceCalculator.from_cell_boundaries(result,
-    method="linear", extrapolation="nearest")
-```
-
-### Distance between two cells
+Compare projected XY distance with the straight lifted route and a graph
+geodesic between the same pair. Here the first and last rows provide sample
+endpoints. For your own analysis, select the rows by cell ID.
 
 ```python
 import numpy as np
+from deprojpy import SurfaceDistanceCalculator, SurfaceGraph
 
-centers_phys = np.asarray([cell.center[:2] for cell in result.epicells])
-# Opt in to the area-weighted locations by supplying their XY coordinates:
-surface_centers_phys = np.asarray(
-    [cell.surface_centroid[:2] for cell in result.epicells]
+start, end = cells.iloc[[0, -1]][["xc", "yc"]].to_numpy()
+calculator = SurfaceDistanceCalculator.from_cell_boundaries(result)
+graph = SurfaceGraph.from_calculator(calculator, step="auto", connectivity="16")
+
+projected = np.linalg.norm(end - start)
+straight = calculator.straight_distance(start, end, input_units="physical")
+geodesic, path_px = graph.distance(
+    start, end, input_units="physical", return_path=True
 )
-i, j = 10, 200
+print(result.units, projected, straight, geodesic)
 
-d_straight = boundary_calc.straight_distance(
-    centers_phys[i], centers_phys[j], input_units="physical")
+fig, ax = plotting.plot_3d_boundaries(result, "area")
+if len(path_px):
+    path_xy = path_px * calculator.pixel_size
+    path_z = calculator.sample_height(path_px, input_units="pixel")
+    ax.plot(path_xy[:, 0], path_xy[:, 1], path_z, color="black", linewidth=2)
 ```
 
-### Graph-geodesic path
+The overlay uses a surface reconstructed from the cell boundaries. To measure
+on the prepared height map, build the calculator with `from_result(result)`
+instead. See the [distance guide](surface_distances.md) for path definitions,
+graph resolution, and endpoint snapping.
+
+## Preview prisms and measure fluorescence
+
+Supply an original stack aligned to the segmentation and height map. This
+example assumes two channels in CZYX order and uses the default stack spacing
+from the deprojection result. Choose the tissue side in the original stack
+and inspect a prism before processing the full image.
 
 ```python
-graph = SurfaceGraph.from_calculator(boundary_calc,
-    step="auto", target_nodes=80_000, connectivity="16")
+from deprojpy import intensity
 
-d_graph, path_px = graph.distance(centers_phys[i], centers_phys[j],
-    input_units="physical", return_path=True)
-```
-
-Graph paths are returned in pixel coordinates. To plot them in 3D, sample the
-calculator surface and convert xy back to physical units.
-
-```python
-path_z = boundary_calc.sample_height(path_px, input_units="pixel")
-path_xyz = np.column_stack([path_px * result.pixel_size, path_z])
-```
-
-<p align="center">
-  <img src="images/3D_distance.png" width="100%">
-</p>
-
-### All-pairs straight surface distances
-
-The straight-distance calculator has an optimized all-pairs path.
-
-```python
-D = boundary_calc.straight_pairwise_distances(
-    centers_phys, input_units="physical")
-```
-
-`D[i, j]` is the straight surface distance between cells `i` and `j`, in
-physical units.
-
-## 8. Curvature and array-valued features
-
-Some cell features are stored as scalar components of array-valued attributes.
-For curvature maps, use the scalar feature names exposed by the plotting module.
-
-```python
-fig, ax = dp.plotting.plot_feature_map(result, "curvature_mean",
-    cmap="coolwarm")
-```
-
-Other useful names include:
-
-```text
-curvature_mean
-curvature_gaussian
-curvature_k1
-curvature_k2
-```
-
-For signed quantities such as curvature, it is often useful to pass a divergent
-normalization.
-
-```python
-from matplotlib.colors import CenteredNorm
-
-fig, ax = dp.plotting.plot_feature_map(result, "curvature_mean",
-    cmap="coolwarm", norm=CenteredNorm(vcenter=0))
-```
-
-## 9. Compare mask and label workflows
-
-If you generate labels from the same mask, the two workflows should give similar
-results, but cell order and label IDs may differ. Match cells by center position,
-then compare features.
-
-```python
-from scipy.spatial import KDTree
-import numpy as np
-
-centers_a = np.asarray([cell.center for cell in result_mask.epicells])
-centers_b = np.asarray([cell.center for cell in result_labels.epicells])
-
-dist, idx_b = KDTree(centers_b).query(centers_a)
-area_a = np.asarray([cell.area for cell in result_mask.epicells])
-area_b = np.asarray([result_labels.epicells[j].area for j in idx_b])
-
-relative_difference = np.abs(area_b - area_a) / area_a
-```
-
-Then plot the mismatch on one of the geometries:
-
-<p align="center">
-  <img src="images/label vs mask area mismatch - rel.png" width="100%">
-</p>
-
-## 10. Measure surface-normal intensities
-
-Prepare cell prisms once, then reuse them for explicitly named aligned channels.
-An array stack may use `(z, y, x)` or channel-first `(c, z, y, x)` axes;
-geometry remains physical `(x, y, z)`.
-
-```python
-calibration = dp.intensity.StackCalibration(
-    spacing_zyx=(0.5, PIXEL_SIZE, PIXEL_SIZE),
-    origin_zyx=(0.0, 0.0, 0.0),
-)
-regions = dp.intensity.prepare_regions(
+regions = intensity.prepare_regions(
     result,
-    depth_range=(-1.0, 5.0),
+    depth_range=(0.0, 3.0),
     depth_units="slices",
     tissue_side="increasing_z",
-    calibration=calibration,
 )
-measurements = dp.intensity.measure(
+cell_id = int(cells.iloc[0]["id"])
+fig, ax = intensity.plot_region_preview(result, regions, cell_ids=[cell_id])
+
+measured = intensity.measure(
     stack_czyx,
     regions,
-    channel_names=["membrane", "cytosol", "nuclei"],
-    channels=[1, 0],  # cytosol, then membrane
-    measurements=("mean", "median", "mode", "sampled_volume"),
-    mode_bins="auto",
+    channel_names=["membrane", "cytosol"],
+    channels=1,
+    measurements=("mean", "std"),
+)
+fluorescence = measured.to_dataframe()
+fig, ax = intensity.plot_feature_map(
+    result, measured, channel="cytosol", feature="mean"
 )
 ```
 
-For a cropped stack, `origin_zyx` is the original physical `(z, y, x)`
-coordinate represented by its index `(0, 0, 0)`. Slice depths are axial-spacing
-equivalents measured along the cell normal. Physical intervals are also valid:
+Inspect flagged rows before comparing intensities. For example, a clipped
+cell may still have a finite mean based on the part sampled inside the stack.
 
 ```python
-physical_regions = dp.intensity.prepare_regions(
-    result,
-    depth_range=(-0.5, 3.0),
-    depth_units="um",
-    tissue_side="increasing_z",
-    calibration=calibration,
-)
+needs_review = fluorescence.loc[
+    fluorescence["clipped"] | fluorescence["status"].ne("ok"),
+    ["id", "channel", "coverage_fraction", "finite_volume", "status", "reason"],
+]
+print(needs_review.head())
+measured.save("intensity-measurements.npz")
 ```
 
-Inspect the actual prisms and plot an ID-aligned measurement without mutating
-cell objects:
-
-```python
-fig, ax = dp.intensity.plot_region_preview(result, regions, cell_ids=[cell_id])
-fig, ax = dp.intensity.plot_feature_map(
-    result, measurements, channel="cytosol", feature="mean"
-)
-measurements.save("intensity-measurements.npz")
-loaded = dp.intensity.MeasurementResult.load("intensity-measurements.npz")
-```
-
-`requested_volume`, `sampled_volume`, `finite_volume`, `coverage_fraction`,
-`clipped`, `status`, and `reason` distinguish geometry, stack coverage, and
-nonfinite intensity omissions. Interpolation estimates a physical region;
-finer numerical sampling does not increase optical resolution.
-
-## 11. Troubleshooting
-
-### The z-axis looks inverted
-
-Check that the same `invert_z` convention was used to create the result and any
-surface-distance calculator derived from the raw height map.
-
-```python
-print(np.nanmin(result.prepared_heightmap), np.nanmax(result.prepared_heightmap))
-print(np.nanmin(calc.heightmap), np.nanmax(calc.heightmap))
-```
-
-If you want the calculator to follow exactly the deprojected result surface, use:
-
-```python
-calc = SurfaceDistanceCalculator.from_result(result)
-```
-
-or, for the fitted cell-boundary surface:
-
-```python
-calc = SurfaceDistanceCalculator.from_cell_boundaries(result)
-```
-
-### Graph paths look jagged or digital
-
-That is expected for graph geodesics. Even with `step=1`, the path is restricted
-to a finite set of graph-edge directions. Use graph distances as approximate
-geodesics, not as smooth continuous paths.
-
-For smoother visualization, plot the path returned by the graph, then resample or
-smooth it for display only.
-
-### Distances seem too small or too large
-
-Check input coordinate units. Most point-input methods accept:
-
-```python
-input_units="pixel"
-input_units="physical"
-```
-
-Returned distances are always in physical units.
-
-### Label workflow fails to import
-
-Install the companion package:
-
-```bash
-python -m pip install "labelimage-tools[all]"
-```
-
-## 12. Run the example scripts
-
-From the repository root:
-
-```bash
-python examples/01_run_sample.py
-python examples/02_plot_gallery.py
-python examples/03_run_labeled_sample.py
-python examples/04_label_plots.py
-python examples/05_surface_distances.py
-python examples/06_surface_normal_intensity.py
-```
-
-Generated plots are written under:
-
-```text
-examples/output/plots/
-```
+The [intensity guide](intensity.md) explains calibration for cropped or
+resampled stacks, depth units, quality fields, and metric costs. Run the
+[synthetic intensity example](../examples/06_surface_normal_intensity.py)
+if you want to try the workflow without supplying your own stack.

@@ -1,9 +1,66 @@
-# Surface-normal intensity measurements
+# Measure fluorescence along the cell surface normal
 
-`deprojpy.intensity` measures a calibrated `(z, y, x)` fluorescence stack in
-planar prisms fitted to each cell boundary. The footprint preserves the ordered,
-possibly non-convex outline; positive depth follows the explicitly selected
-tissue-facing side of the **original** stack.
+On a tilted part of a tissue, sampling straight down through the image stack
+can move you sideways relative to the cell interior. DeProjPy uses the
+deprojected cell outline to aim the sampling region perpendicular to the
+local surface. This gives you a way to compare fluorescence at similar
+depths beneath cells with different orientations.
+
+![A vertical sampling region and a surface-normal region on a tilted cell](images/05_curved_cell_closeup_clean.png)
+
+*In this cross-section, the pink region follows the local surface normal.
+The dashed gold region follows the stack's Z axis. The cell interior is
+schematic.*
+
+## How a region becomes a fluorescence measurement
+
+1. **Build the region.** DeProjPy fits a flat plane to the cell's 3D boundary
+   and projects the outline onto that plane. It extends the outline along
+   the direction perpendicular to the plane (the *normal*) over the depth
+   interval you choose. The result is a prism with the cell's outline as its
+   footprint. It approximates a part of the cell and can overlap a nearby
+   cell's prism.
+2. **Place points inside it.** DeProjPy divides the footprint into small
+   triangles and the depth interval into layers. Each triangle and layer
+   together form a small piece of the prism. DeProjPy takes one sample at
+   the center of each piece. The pieces cover the requested depth interval,
+   and each sample represents the volume of its piece (triangle area times
+   layer thickness).
+3. **Read the fluorescence at each point.** The points usually fall between
+   voxel centers. DeProjPy estimates the intensity there by blending the
+   neighboring voxel values according to distance along each image axis.
+   This is *trilinear interpolation*, using up to eight neighbors in 3D.
+   A voxel just beyond the prism can help estimate a point inside it.
+4. **Combine the samples.** For a mean, multiply each sampled intensity by
+   the volume it represents, add the products, and divide by the contributing
+   volume. A sample representing twice the volume has twice the influence.
+   The same idea gives volume-weighted medians and histograms.
+
+![A cell footprint tiled with triangles, with one triangle extended through a depth layer](images/triangle-prism-sampling.png)
+
+The triangles fit together to cover the cell outline, including any inward
+corners. Extending one triangle through one depth layer gives a small
+triangular prism. The point at its center supplies the intensity estimate
+for that piece, and the triangle’s area times the layer’s thickness gives
+the volume it represents.
+
+![Sampling points inside the tilted region over the image grid](images/08_prism_sampling_clean.png)
+
+*The points in the pink region are where DeProjPy estimates intensities.
+They are distinct from the voxel centers where the image was acquired.
+The weights used for the statistics come from the pieces of the prism,
+rather than from intersecting the prism with individual image voxels.*
+
+This method of estimating a volume measurement from weighted points is
+called *quadrature*. Set `sampling_spacing` to control the size of the
+triangles and layers. It defaults to the result's XY pixel size. Smaller
+spacing usually gives more points and takes longer. It can refine the
+numerical estimate using the same image data.
+
+## Choose the depth and measure a channel
+
+Start with a deprojection `result` and an aligned fluorescence stack. This
+example uses a two-channel array ordered as `(channel, z, y, x)`, the usual order in which microscopy images are encoded.
 
 ```python
 from deprojpy import intensity
@@ -15,99 +72,125 @@ regions = intensity.prepare_regions(
     tissue_side="increasing_z",
 )
 values = intensity.measure(
-    {"membrane": membrane_zyx, "cytosol": cytosol_zyx},
+    stack_czyx,
     regions,
-    measurements=("mean", "mode", "std", "sampled_volume"),
-    mode_bins="auto",
+    channel_names=["membrane", "cytosol"],
+    channels=[1],
+    measurements=("mean", "std"),
 )
 frame = values.to_dataframe()
+```
+
+Choose `tissue_side="increasing_z"` if the interior is toward higher slice
+indices in the **original acquisition stack**. Use `"decreasing_z"` for
+the opposite direction. Positive depths go toward the interior and negative
+depths go to the other side of the fitted plane.
+
+With `depth_units="slices"`, each depth unit is one Z slice spacing measured
+*along the normal*. For example, with 0.5 µm between slices, `(-1, 5)` runs
+from −0.5 to +2.5 µm, even for a tilted cell. You can also give depths in
+the result's length units, `um`/`µm`, or `mm`.
+
+By default, the stack uses the result's Z spacing and XY pixel size.
+For a cropped or resampled stack, supply
+`calibration=intensity.StackCalibration((dz, dy, dx), (z0, y0, x0))`
+to `prepare_regions`. Use the result's length units for both the spacing
+and the origin. The origin is the physical location, in the original
+acquisition coordinates, of the supplied stack's first voxel center.
+Results saved before schema 1.2 require an explicit `z_reflected` and,
+for reflected results, `z_reflection_offset`.
+
+## Name and select channels
+
+| What you have | How to pass it |
+| --- | --- |
+| One 3D stack, ordered `(z, y, x)` | Pass the array. Optionally name it with `channel_names="GFP"`. |
+| One 4D stack, ordered `(channel, z, y, x)` | Optionally give one name per channel in stack order. Select channels by their original positions, starting at zero. |
+| Separate aligned 3D stacks | Pass a dictionary such as `{"GFP": gfp_zyx, "Delta": delta_zyx}`. Select by dictionary key, for example `channels="Delta"`. |
+
+For a 4D stack, `channels=[2, 0]` measures the third channel first, then
+the first, even if you supply custom names. Omit `channels` to measure all
+channels in the stack or dictionary.
+
+## Read the measurements and check coverage
+
+Each row corresponds to one cell and one channel. Use `id` to link back
+to the deprojection result and `source_label` to link to the original
+label image when available.
+
+A prism can extend past the stack. DeProjPy keeps sample points that fall
+within the range of voxel centers, from the first to the last center on each
+axis. A point inside that range contributes the full volume of its piece
+to `sampled_volume`; a point outside contributes zero. Pieces that cross
+the boundary therefore give an approximate coverage estimate. If coverage
+matters to the analysis, check how it changes with a smaller
+`sampling_spacing`.
+
+| Column | What it tells you |
+| --- | --- |
+| `requested_volume` | Volume of the whole prism |
+| `sampled_volume` | Volume represented by points inside the stack |
+| `finite_volume` | Volume represented by in-stack points with finite intensities in this channel |
+| `coverage_fraction` | Sampled volume divided by requested volume, when defined |
+| `clipped` | Whether the prism extends beyond the stack's sampling bounds |
+| `status`, `reason` | Whether the result is usable as sampled, and any issue found |
+
+A clipped prism can still give a useful measurement of the part inside
+the stack. If the prism might overlap the stack but no sampling point lands
+inside it, the status is `unresolved_sampling_coverage`. If the prism is
+geometrically outside the stack, the status is `outside_stack`. Points
+with NaN or infinite interpolated intensities are left out of the intensity
+statistics. With no finite samples, those statistics are NaN. A finite
+zero is a valid intensity.
+
+## Choose statistics
+
+The default returns the mean, median, standard deviation, and volume
+information. All coverage columns above are included even when you request
+only one intensity statistic.
+**Streaming** means DeProjPy updates the statistic as it reads samples,
+without keeping all their intensities in memory. Median, quartiles, and
+mode need to retain the samples for each cell and channel.
+
+| Metric | What DeProjPy calculates | What it requires |
+| --- | --- | --- |
+| `mean`, `std` | Volume-weighted mean and population standard deviation | Streaming |
+| `minimum`, `maximum` | Lowest and highest finite sampled intensities | Streaming |
+| `integrated_intensity` | Sum of intensity × represented volume | Streaming |
+| `raw_sample_sum` | Sum of sampled intensities. Depends on the number of sampling points. | Streaming |
+| `q25`, `median`, `q75` | Volume-weighted quartiles | Retains samples and finds the intensity at each requested cumulative-volume threshold |
+| `mode` | Midpoint of the histogram bin with the most represented volume per unit of intensity | Retains samples, builds a weighted histogram, and uses SciPy interpolation for the entire call |
+
+The default includes `median`. If you only need the mean and standard
+deviation, use `measurements=("mean", "std")` to skip retaining the samples
+and finding the median, which takes time and memory. The volume and coverage columns are still included.
+
+**Mode can be noticeably slower.** It needs to keep the samples for the
+histogram and uses the SciPy interpolation routine for the whole call so
+that samples on bin edges are assigned consistently. Use `mode_bins="auto"`,
+a positive bin count, or explicit increasing bin edges. Automatic bin
+edges are chosen from the intensities alone. Each sample then adds its
+volume weight to the histogram, and the winning bin is chosen after
+dividing by bin width. Ties go to the lower bin. Values outside explicit
+edges are excluded. A constant distribution within the chosen range
+returns that constant. The table records the edges in `mode_bin_edges`.
+Use `measurements="all"` to request every statistic, including mode.
+
+## Inspect a prism and save your results
+
+```python
+cell_id = int(result.to_dataframe().iloc[0]["id"])
+intensity.plot_region_preview(result, regions, cell_ids=[cell_id])
 intensity.plot_feature_map(result, values, channel="cytosol", feature="mean")
 values.save("intensity-results.npz")
 ```
 
-`measure` accepts three explicit stack forms. A ZYX array has one scalar label;
-a CZYX array has one label per source channel and is selected by zero-based
-source indices; a mapping uses its keys as labels and is selected by key. Naming
-and selection are independent, and selections preserve the requested order:
+The preview shows the cell boundary, the two ends of the prism, and the
+positive-depth direction. Check it when choosing depth or tissue side. The
+archive keeps the table and settings, including calibration and selected
+metrics. It contains no image data.
 
-```python
-gfp = intensity.measure(stack_zyx, regions, channel_names="GFP")
-subset = intensity.measure(
-    stack_czyx,
-    regions,
-    channel_names=["Junctions", "GFP", "Delta"],
-    channels=[2, 0],  # Delta, then Junctions
-)
-delta = intensity.measure(
-    {"GFP": gfp_zyx, "Delta": delta_zyx},
-    regions,
-    channels="Delta",
-)
-```
-
-For CZYX input, `channels` always refers to the original channel axis, even
-when custom names are supplied. Omit `channels` to measure all channels in
-source or mapping order. CZYX selection uses views rather than copying selected
-volumes.
-
-The default acquisition spacing is `(result.voxel_depth, result.pixel_size,
-result.pixel_size)`. For a cropped or resampled stack, pass
-`StackCalibration((dz, dy, dx), (z0, y0, x0))`; all values must use the result's
-length unit. The origin is the original physical coordinate represented by the
-supplied stack's index zero. Results serialized before schema 1.2 lack the Z
-reflection mapping, so `prepare_regions` requires an explicit `z_reflected` and,
-when reflected, `z_reflection_offset`.
-
-Slice depths are axial-spacing equivalents along the physical normal. Thus
-`(0, 5)` is exactly five axial spacings thick, including for tilted cells.
-Physical depths accept result units, `um`/`µm`, or `mm`. A single
-`sampling_spacing` controls the maximum subtriangle edge and depth-bin width.
-Equal-width midpoint bins partition the requested depth interval exactly.
-Triangle-centroid samples use exact subtriangle area weights, retain narrow and
-non-convex footprints, and integrate affine fields exactly when fully in bounds.
-
-Linear interpolation uses the closed image-index domain `[0, size - 1]`.
-Partially clipped prisms use the supported portion and are flagged. Nonfinite
-interpolates are omitted separately: `sampled_volume` remains the in-bounds
-quadrature volume and `finite_volume` is the contributing denominator. Mean,
-population standard deviation, median and quartiles are volume weighted;
-quantiles use the inverse weighted empirical CDF. `raw_sample_sum` depends on
-sampling density. Interpolated measurements estimate a physical region—not an
-original-voxel histogram—and oversampling does not add optical resolution.
-Clipped and unclipped cells use the same requested `sampling_spacing` and
-quadrature. A boundary element contributes its full existing volume weight when
-its sampling point lies inside interpolation support, and contributes nothing
-otherwise. Thus clipped `sampled_volume` and `coverage_fraction` are numerical
-estimates, not exact arbitrary prism/box intersections. Reduce the one explicit
-`sampling_spacing` to perform a convergence check. If geometry may intersect
-the stack but samples miss it, status is `unresolved_sampling_coverage` rather
-than the incorrect `outside_stack`.
-
-`mode` is a volume-weighted histogram estimate rather than exact-value
-frequency counting. `mode_bins` accepts `"auto"`, a positive bin count, or
-explicit increasing edges. The result is the midpoint of the bin with greatest
-volume density (weight divided by width); ties choose the lower bin. Automatic
-edges use NumPy's unweighted rule, while bin accumulation remains volume
-weighted. The measurement table records the actual edges used for each row.
-
-The model assumes that one biological interior Z direction applies across a
-sheet representable by a heightmap. It does not follow curvature within a cell,
-taper prisms, resolve overlap, or provide a volumetric segmentation. Exact
-median/quantiles buffer one cell's interpolated values; interpolation itself is
-generated and interpolated in blocks of at most `max_batch_samples`, including
-within one large cell. Streaming-only selections do not sort or buffer sample
-values. Exact quantiles and mode have a separate
-`max_buffered_samples_per_cell` limit. Each cell is finalized after its last
-sample block has been consumed by every channel, and its exact-statistic buffers
-are then released. Peak buffer memory therefore follows active regions plus the
-current batch rather than all previously completed cells. One large cell can
-still require substantial exact-statistic storage, and concatenation/sorting
-temporarily adds memory. Cached lateral quadrature is a separate preparation
-cost and is not bounded by `max_batch_samples`.
-
-`plot_region_preview` draws the original boundary, both requested depth faces,
-connecting prism sides, and the positive-depth normal with physical XYZ aspect.
-Measurement archives are versioned `.npz` files containing the table and
-provenance but never the image stack. Files preserve channel identifiers,
-nonfinite values, mode edges, metric selection, units, calibration, coordinate
-mapping, and numerical conventions without NumPy pickle.
+See the [cookbook](cookbook.md#preview-prisms-and-measure-fluorescence)
+for a coverage check and the
+[synthetic example](../examples/06_surface_normal_intensity.py) for a
+workflow you can run without an acquisition stack.
