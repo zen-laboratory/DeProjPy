@@ -74,14 +74,14 @@ class StreamingReducer:
         self.finite_volume += block_volume
         self.finite_count += len(values)
 
-        block_weighted_sum = None
+        block_weighted_sum = 0.0
         if self.requirements.weighted_mean or self.requirements.integrated_intensity:
             block_weighted_sum = float(np.sum(values * weights))
 
         # Merge block moments with the parallel weighted-Welford formula. This
         # avoids the cancellation of E[x²] - E[x]² across many batches.
         if self.requirements.weighted_mean:
-            block_mean = block_weighted_sum / block_volume # type: ignore (block_weighted_sum is not None if weighted_mean is True)
+            block_mean = block_weighted_sum / block_volume
             block_m2 = (
                 float(np.sum(weights * (values - block_mean) ** 2))
                 if self.requirements.weighted_variance
@@ -100,7 +100,7 @@ class StreamingReducer:
                 )
 
         if self.requirements.integrated_intensity:
-            self.weighted_sum += block_weighted_sum # type: ignore (block_weighted_sum is not None if weighted_mean is True)
+            self.weighted_sum += block_weighted_sum
         if self.requirements.raw_sample_sum:
             self.raw_sum += float(np.sum(values))
         if self.requirements.minimum:

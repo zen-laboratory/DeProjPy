@@ -78,7 +78,7 @@ def _ordered_sequence(value) -> list | None:
 
 
 def _validate_channel_images(
-    items: list[tuple[str | int, object]],
+    items: Sequence[tuple[str | int, object]],
 ) -> list[tuple[str | int, np.ndarray]]:
     """Require real, nonempty ZYX channels on one aligned acquisition grid."""
     validated: list[tuple[str | int, np.ndarray]] = []
@@ -287,7 +287,7 @@ def _finalize_reducer(
             quantile_values = statistics.weighted_quantiles(
                 values,
                 weights,
-                requested_quantiles.values(),
+                tuple(requested_quantiles.values()),
             )
             for name, quantile in requested_quantiles.items():
                 output[name] = quantile_values[quantile]
@@ -407,7 +407,7 @@ def measure(
     # provable disjointness independent of whether quadrature hits the boundary.
     # An empty channel mapping has no rows but retains a stable table schema.
     image_shape_zyx = resolved_channels[0][1].shape if resolved_channels else (0, 0, 0)
-    coverages = (
+    coverages: list[RegionCoverage | None] = (
         _initial_coverages(regions, image_shape_zyx)
         if resolved_channels
         else [None] * cell_count
@@ -619,6 +619,6 @@ def measure(
         "max_buffered_samples_per_cell": max_buffered_samples_per_cell,
     }
     return MeasurementResult(
-        table=pd.DataFrame(rows, columns=columns),
+        table=pd.DataFrame(rows, columns=pd.Index(columns)),
         provenance=provenance,
     )

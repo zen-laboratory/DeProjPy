@@ -61,11 +61,25 @@ def _resolve_calibration(
         spacing_array = np.asarray(spacing_zyx, dtype=float)
         if spacing_array.shape != (3,):
             raise ValueError("spacing_zyx must have exactly three values (dz, dy, dx)")
-        resolved_spacing = tuple(float(value) for value in spacing_array)
+        resolved_spacing = (
+            float(spacing_array[0]),
+            float(spacing_array[1]),
+            float(spacing_array[2]),
+        )
 
-    resolved_origin = (0.0, 0.0, 0.0) if origin_zyx is None else tuple(origin_zyx)
+    if origin_zyx is None:
+        resolved_origin = (0.0, 0.0, 0.0)
+    else:
+        origin_array = np.asarray(origin_zyx, dtype=float)
+        if origin_array.shape != (3,):
+            raise ValueError("origin_zyx must have exactly three values (z0, y0, x0)")
+        resolved_origin = (
+            float(origin_array[0]),
+            float(origin_array[1]),
+            float(origin_array[2]),
+        )
     return StackCalibration(
-        spacing_zyx=resolved_spacing, # type: ignore (shape is ensure by shape of spacing_array)
+        spacing_zyx=resolved_spacing,
         origin_zyx=resolved_origin,
     )
 

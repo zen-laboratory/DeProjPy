@@ -6,7 +6,10 @@ entry point; numerical intensity workflows do not import pyplot.
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
+import pandas as pd
 
 from ._models import MeasurementResult, PreparedRegions
 
@@ -32,15 +35,17 @@ def plot_feature_map(
     table = measurements.table
     # Compare identifiers directly: integer ``1`` and string ``"1"`` are
     # distinct persisted channels and must not be merged for convenience.
-    channel_rows = table[table["channel"] == channel]
+    channel_values = cast(pd.Series, table["channel"])
+    channel_rows = table[channel_values == channel]
     if channel_rows.empty:
-        available = list(dict.fromkeys(table["channel"].tolist()))
+        available = list(dict.fromkeys(channel_values.tolist()))
         raise ValueError(
             f"channel {channel!r} is absent from measurements; available: {available}"
         )
     if feature not in channel_rows.columns:
         raise ValueError(f"measurement feature {feature!r} is not present in the table")
-    if channel_rows["id"].duplicated().any():
+    measured_id_values = cast(pd.Series, channel_rows["id"])
+    if measured_id_values.duplicated().any():
         raise ValueError(
             "measurement table contains duplicate cell identifiers for this channel"
         )
@@ -48,7 +53,7 @@ def plot_feature_map(
     # Require an exact ID join. Silently painting a missing measurement as a
     # missing color could hide a failed upstream row-retention invariant.
     result_ids = [cell.id for cell in result.epicells]
-    measured_ids = set(channel_rows["id"].tolist())
+    measured_ids = set(measured_id_values.tolist())
     missing_ids = sorted(set(result_ids) - measured_ids)
     extra_ids = sorted(measured_ids - set(result_ids))
     if missing_ids or extra_ids:
@@ -134,6 +139,7 @@ def plot_region_preview(
         if wanted_ids is not None and region.cell_id not in wanted_ids:
             continue
         source_cell = result_cells.get(region.cell_id)
+        source_boundary_xyz: np.ndarray | None = None
         if source_cell is not None:
             source_boundary_xyz = np.asarray(source_cell.boundary, dtype=float)
             closed_source_xyz = np.vstack([source_boundary_xyz, source_boundary_xyz[0]])
@@ -141,9 +147,15 @@ def plot_region_preview(
             plotted_points.append(source_boundary_xyz)
 
         if region.status != "ok":
-            if source_cell is not None:
+            if source_boundary_xyz is not None:
                 center_xyz = np.mean(source_boundary_xyz, axis=0)
-                axis.text(*center_xyz, f"{region.cell_id}: invalid", color="tab:red")
+                axis.text(
+                    center_xyz[0],
+                    center_xyz[1],
+                    center_xyz[2],
+                    f"{region.cell_id}: invalid", # type: ignore (linter not used to 3D axis, asusumes second argument should be the string)
+                    color="tab:red",
+                )
             continue
 
         # Start/end faces share the fitted polygon and differ only by signed

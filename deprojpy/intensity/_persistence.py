@@ -151,7 +151,7 @@ def _decode_table(text: str) -> pd.DataFrame:
             raise ValueError(
                 f"measurement column {column!r} cannot be restored as {dtype!r}"
             ) from error
-    return pd.DataFrame(restored_columns, columns=columns)
+    return pd.DataFrame(restored_columns, columns=pd.Index(columns))
 
 
 def _encode_provenance(provenance: dict) -> str:
