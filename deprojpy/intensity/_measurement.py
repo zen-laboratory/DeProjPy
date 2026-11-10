@@ -6,8 +6,8 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
-from scipy import ndimage
 
+from . import _interpolation as interpolation
 from . import _statistics as statistics
 from ._models import MeasurementResult, PreparedRegions
 from ._sampling import (
@@ -290,6 +290,15 @@ def measure(
     ]
     finite_volume = np.zeros((len(channels), cell_count), dtype=float)
 
+    # ULP-level arithmetic differences can change a histogram bin at an exact
+    # edge. Mode requests therefore retain SciPy's reference interpolation;
+    # other metrics use the specialized path for supported image dtypes/shapes.
+    specialized_channels = [
+        "mode" not in selected and interpolation.can_use_specialized_trilinear(image)
+        for _, image in channels
+    ]
+    specialized_channel_count = sum(specialized_channels)
+
     # Coordinates are already compacted in bounds and grouped into contiguous
     # region spans. Reuse each bounded coordinate block across aligned channels.
     for block in iter_sample_blocks(
@@ -302,18 +311,24 @@ def measure(
             sampled_volume[span.region_index] += span.sampled_volume
 
         if len(block.stack_index_zyx):
+            prepared_coordinates = (
+                interpolation.prepare_trilinear_coordinates(
+                    block.stack_index_zyx,
+                    image_shape_zyx,
+                )
+                if specialized_channel_count >= 2
+                else None
+            )
             # Interpolate one channel at a time so channel count does not
             # multiply coordinate/value scratch memory. The same span offsets
             # partition every channel's output without per-region mask scans.
             for channel_index, (_, image) in enumerate(channels):
-                values = ndimage.map_coordinates(
+                use_specialized = specialized_channels[channel_index]
+                values = interpolation.interpolate_values(
                     image,
-                    block.stack_index_zyx.T,
-                    order=1,
-                    mode="constant",
-                    cval=np.nan,
-                    prefilter=False,
-                    output=float,
+                    block.stack_index_zyx,
+                    prepared=prepared_coordinates if use_specialized else None,
+                    use_specialized=use_specialized,
                 )
                 # Nonfinite interpolates contribute to sampled volume but not
                 # to statistics or their finite-volume denominator.

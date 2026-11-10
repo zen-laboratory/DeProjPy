@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from deprojpy import intensity
+from deprojpy.intensity import _interpolation as interpolation
 from deprojpy.intensity import _statistics as statistics
 from deprojpy.intensity._sampling import (
     build_sampling_plans,
@@ -411,6 +412,24 @@ def test_mode_constant_tie_nonfinite_and_validation():
     assert (measured.table["finite_volume"] == 0).all()
     assert (measured.table["sampled_volume"] > 0).all()
     assert set(measured.table["status"]) == {"nonfinite_omitted"}
+
+
+def test_mode_requests_retain_scipy_interpolation(monkeypatch):
+    regions = _two_cell_regions()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("specialized interpolation must not run for mode")
+
+    monkeypatch.setattr(interpolation, "_trilinear_sample", forbidden)
+    monkeypatch.setattr(interpolation, "_trilinear_sample_prepared", forbidden)
+    measured = intensity.measure(
+        {"first": np.ones((12, 12, 12)), "second": np.full((12, 12, 12), 2.0)},
+        regions,
+        measurements=("mode", "median"),
+        mode_bins=[0.0, 1.5, 3.0],
+    )
+
+    assert measured.table["mode"].tolist() == [1.0, 1.0, 2.0, 2.0]
 
 
 def test_geometric_disjointness_and_missed_sliver_are_distinct():
