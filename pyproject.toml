@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deprojpy"
-version = "0.1.2"
+version = "0.1.3"
 description = "Python behavioral core port of the DeProj MATLAB toolbox"
 readme = "docs/README-pypi.md"
 requires-python = ">=3.10"
@@ -33,6 +33,10 @@ labels = []
 
 [project.scripts]
 deprojpy-smoke = "deprojpy.cli:main"
+
+[project.urls]
+Repository = "https://github.com/zen-laboratory/DeProjPy"
+Issues = "https://github.com/zen-laboratory/DeProjPy/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
