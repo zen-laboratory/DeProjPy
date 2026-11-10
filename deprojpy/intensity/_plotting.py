@@ -77,6 +77,8 @@ def plot_region_preview(
     cell_ids=None,
     ax=None,
     normal_scale=None,
+    fill_face: str | None = None,
+    fill_alpha: float = 0.35,
 ):
     """Preview selected fitted prisms and tissue-facing normals in XYZ.
 
@@ -96,7 +98,12 @@ def plot_region_preview(
         Optional Matplotlib 3-D axis.
     normal_scale
         Arrow length in result units. By default it spans the larger of the
-        requested depth magnitude and one sampling spacing.
+        requested depth magnitude and one sampling spacing. 
+    fill_face
+        Optional string indicating which face to fill. Can be 'start' for the
+        start face, 'surface' for the fitted surface, or None to disable filling.
+    fill_alpha
+        Alpha value for the filled regions.
 
     Returns
     -------
@@ -104,6 +111,10 @@ def plot_region_preview(
         Matplotlib parent figure and 3-D axis.
     """
     import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    if fill_face not in (None, "start", "surface"):
+        raise ValueError("fill_face must be None, 'start', or 'surface'")
 
     if ax is None:
         figure = plt.figure(layout="constrained")
@@ -166,6 +177,25 @@ def plot_region_preview(
         )
         start_face_xyz = fitted_boundary_xyz + region.start_depth * region.normal_xyz
         end_face_xyz = fitted_boundary_xyz + region.end_depth * region.normal_xyz
+
+        if fill_face is not None:
+            if fill_face == "start":
+                fill_xyz = start_face_xyz
+                fill_color = "tab:blue"
+            else:
+                fill_xyz = fitted_boundary_xyz
+                fill_color = "tab:green"
+
+            axis.add_collection3d( # type: ignore (linter not used to 3D axis, dosn't know about add_collection3d)
+                Poly3DCollection(
+                    [fill_xyz],
+                    facecolors=fill_color,
+                    edgecolors="none",
+                    alpha=fill_alpha,
+                )
+            )
+            plotted_points.append(fill_xyz)
+
         for face_xyz, color in (
             (start_face_xyz, "tab:blue"),
             (end_face_xyz, "tab:orange"),
