@@ -340,7 +340,8 @@ Then plot the mismatch on one of the geometries:
 ## 10. Measure surface-normal intensities
 
 Prepare cell prisms once, then reuse them for explicitly named aligned channels.
-Stack axes are always `(z, y, x)`; geometry remains physical `(x, y, z)`.
+An array stack may use `(z, y, x)` or channel-first `(c, z, y, x)` axes;
+geometry remains physical `(x, y, z)`.
 
 ```python
 calibration = dp.intensity.StackCalibration(
@@ -355,8 +356,10 @@ regions = dp.intensity.prepare_regions(
     calibration=calibration,
 )
 measurements = dp.intensity.measure(
-    {"membrane": membrane_zyx, "cytosol": cytosol_zyx},
+    stack_czyx,
     regions,
+    channel_names=["membrane", "cytosol", "nuclei"],
+    channels=[1, 0],  # cytosol, then membrane
     measurements=("mean", "median", "mode", "sampled_volume"),
     mode_bins="auto",
 )

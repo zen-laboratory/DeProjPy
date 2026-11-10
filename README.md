@@ -131,8 +131,10 @@ regions = dp.intensity.prepare_regions(
     calibration=calibration,
 )
 measured = dp.intensity.measure(
-    {"membrane": membrane_zyx, "cytosol": cytosol_zyx},
+    stack_czyx,
     regions,
+    channel_names=["membrane", "cytosol", "nuclei"],
+    channels=[1, 0],  # cytosol, then membrane
     measurements=("mean", "median", "mode", "sampled_volume"),
 )
 ```

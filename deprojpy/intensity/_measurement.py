@@ -57,15 +57,31 @@ def _selected_measurements(measurements: str | Sequence[str]) -> tuple[str, ...]
     return selected
 
 
-def _validated_channels(
-    stack: np.ndarray | Mapping[str, np.ndarray],
-    channel: str | int,
-) -> list[tuple[object, np.ndarray]]:
-    """Validate explicit channels and require a shared aligned acquisition grid."""
-    # A mapping is the only multi-channel form: axis guessing would make small
-    # Z stacks indistinguishable from channel-first arrays.
-    items = list(stack.items()) if isinstance(stack, Mapping) else [(channel, stack)]
-    channels: list[tuple[object, np.ndarray]] = []
+def _normalize_channel_id(value, argument: str) -> str | int:
+    """Return one supported channel identifier without bool/int ambiguity."""
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{argument} channel identifiers must not be booleans")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    raise TypeError(f"{argument} channel identifiers must be strings or integers")
+
+
+def _ordered_sequence(value) -> list | None:
+    """Return a concrete non-string sequence, including one-dimensional arrays."""
+    if isinstance(value, np.ndarray):
+        return value.tolist() if value.ndim == 1 else None
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return list(value)
+    return None
+
+
+def _validate_channel_images(
+    items: list[tuple[str | int, object]],
+) -> list[tuple[str | int, np.ndarray]]:
+    """Require real, nonempty ZYX channels on one aligned acquisition grid."""
+    validated: list[tuple[str | int, np.ndarray]] = []
     expected_shape = None
     for channel_name, image_like in items:
         image = np.asarray(image_like)
@@ -83,8 +99,129 @@ def _validated_channels(
             expected_shape = image.shape
         elif image.shape != expected_shape:
             raise ValueError("all channels must share the same aligned (z, y, x) shape")
-        channels.append((channel_name, image))
-    return channels
+        validated.append((channel_name, image))
+    return validated
+
+
+def _array_channel_names(channel_names, channel_count: int) -> list[str | int]:
+    """Resolve the full source-axis label sequence before channel selection."""
+    if channel_names is None:
+        return list(range(channel_count))
+    names = _ordered_sequence(channel_names)
+    if names is None:
+        raise TypeError("channel_names for a CZYX array must be an ordered sequence")
+    if len(names) != channel_count:
+        raise ValueError(
+            f"channel_names must contain one label for each of {channel_count} channels"
+        )
+    normalized = [_normalize_channel_id(name, "channel_names") for name in names]
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("channel_names must not contain duplicate labels")
+    return normalized
+
+
+def _array_channel_indices(channels, channel_count: int) -> list[int]:
+    """Resolve ordered zero-based source indices for a CZYX array."""
+    if channels is None:
+        return list(range(channel_count))
+    if isinstance(channels, (bool, np.bool_)):
+        raise TypeError("channels array indices must not be booleans")
+    if isinstance(channels, (int, np.integer)):
+        requested = [int(channels)]
+    else:
+        sequence = _ordered_sequence(channels)
+        if sequence is None:
+            raise TypeError("channels for a CZYX array must be an integer or sequence")
+        if not sequence:
+            raise ValueError("channels must not be an empty selection")
+        requested = []
+        for index in sequence:
+            if isinstance(index, (bool, np.bool_)):
+                raise TypeError("channels array indices must not be booleans")
+            if not isinstance(index, (int, np.integer)):
+                raise TypeError("channels for a CZYX array must contain only integers")
+            requested.append(int(index))
+
+    if len(set(requested)) != len(requested):
+        raise ValueError("channels must not contain duplicate array indices")
+    for index in requested:
+        if index < 0 or index >= channel_count:
+            raise IndexError(
+                f"channel index {index} is outside the valid range [0, {channel_count})"
+            )
+    return requested
+
+
+def _mapping_channel_keys(channels, available: dict[str | int, np.ndarray]) -> list[str | int]:
+    """Resolve ordered mapping keys, treating a string as one key."""
+    if channels is None:
+        return list(available)
+    if isinstance(channels, (str, int, np.integer)) and not isinstance(
+        channels, (bool, np.bool_)
+    ):
+        requested = [_normalize_channel_id(channels, "channels")]
+    else:
+        sequence = _ordered_sequence(channels)
+        if sequence is None:
+            # Route bools through the identifier validator for its clearer error.
+            _normalize_channel_id(channels, "channels")
+            raise AssertionError("unreachable")
+        if not sequence:
+            raise ValueError("channels must not be an empty selection")
+        requested = [_normalize_channel_id(key, "channels") for key in sequence]
+
+    if len(set(requested)) != len(requested):
+        raise ValueError("channels must not contain duplicate mapping keys")
+    unknown = [key for key in requested if key not in available]
+    if unknown:
+        raise KeyError(f"unknown channel key(s): {unknown}")
+    return requested
+
+
+def _resolve_channels(
+    stack: np.ndarray | Mapping[str | int, np.ndarray],
+    channel_names,
+    channels,
+) -> list[tuple[str | int, np.ndarray]]:
+    """Normalize ZYX, CZYX, and mapping inputs to ordered labeled ZYX views."""
+    if isinstance(stack, Mapping):
+        if channel_names is not None:
+            raise ValueError("channel_names must be omitted for mapping input")
+        source_items = [
+            (_normalize_channel_id(key, "mapping"), image)
+            for key, image in stack.items()
+        ]
+        if len({key for key, _ in source_items}) != len(source_items):
+            raise ValueError("mapping channel keys must be distinct")
+        validated = _validate_channel_images(source_items)
+        available = dict(validated)
+        selected_keys = _mapping_channel_keys(channels, available)
+        return [(key, available[key]) for key in selected_keys]
+
+    array = np.asarray(stack)
+    if array.ndim == 3:
+        if channels is not None:
+            raise ValueError("channels must be omitted for a single ZYX array")
+        if channel_names is None:
+            channel_name = 0
+        else:
+            if _ordered_sequence(channel_names) is not None:
+                raise TypeError("channel_names for a ZYX array must be one scalar identifier")
+            channel_name = _normalize_channel_id(channel_names, "channel_names")
+        return _validate_channel_images([(channel_name, array)])
+
+    if array.ndim == 4:
+        if any(size == 0 for size in array.shape):
+            raise ValueError("CZYX stack axes must all be nonempty")
+        names = _array_channel_names(channel_names, array.shape[0])
+        selected_indices = _array_channel_indices(channels, array.shape[0])
+        # Integer indexing is deliberately performed one channel at a time so
+        # selected CZYX channels remain views, including for strided inputs.
+        return _validate_channel_images(
+            [(names[index], array[index]) for index in selected_indices]
+        )
+
+    raise ValueError("stack must be a ZYX array, a CZYX array, or a channel mapping")
 
 
 def _initial_coverages(
@@ -190,11 +327,12 @@ def _status_for_result(
 
 
 def measure(
-    stack: np.ndarray | Mapping[str, np.ndarray],
+    stack: np.ndarray | Mapping[str | int, np.ndarray],
     regions: PreparedRegions,
     measurements: str | Sequence[str] = DEFAULT_MEASUREMENTS,
     *,
-    channel: str | int = 0,
+    channel_names=None,
+    channels=None,
     max_batch_samples: int = 250_000,
     max_buffered_samples_per_cell: int = 5_000_000,
     mode_bins: str | int | Sequence[float] = "auto",
@@ -204,16 +342,23 @@ def measure(
     Parameters
     ----------
     stack
-        One nonempty ``(z, y, x)`` array, or a mapping of explicit channel IDs
-        to aligned arrays with the same shape. Integer arrays are not converted
-        wholesale; interpolation output alone is floating point.
+        One nonempty ``(z, y, x)`` array, a channel-first ``(c, z, y, x)``
+        array, or a mapping of channel IDs to aligned ZYX arrays. Integer arrays
+        are not converted wholesale; interpolation output alone is floating
+        point.
     regions
         Reusable regions returned by :func:`prepare_regions`.
     measurements
         Metric name sequence, one name, or ``"all"``. The default is mean,
         median, population standard deviation, and sampled volume.
-    channel
-        Identifier used only for a single array input.
+    channel_names
+        A scalar string/integer label for ZYX input, or one ordered, distinct
+        label per source channel for CZYX input. Defaults to ``0`` for ZYX and
+        source indices for CZYX. Omit for mapping input, whose keys are labels.
+    channels
+        Ordered channel subset. For CZYX this is one zero-based source index or
+        a sequence of indices. For mappings it is one key or a sequence of keys.
+        ``None`` selects every channel in source order. Omit for ZYX input.
     max_batch_samples
         Hard upper bound for generated coordinates, index coordinates, and
         interpolation values in one block. Blocks may combine several cells.
@@ -254,48 +399,48 @@ def measure(
         if "mode" in selected
         else "auto"
     )
-    channels = _validated_channels(stack, channel)
+    resolved_channels = _resolve_channels(stack, channel_names, channels)
     requirements = statistics.requirements_for(selected)
     cell_count = len(regions.cells)
 
     # Classify full prism geometry before sampling. This keeps ``clipped`` and
     # provable disjointness independent of whether quadrature hits the boundary.
     # An empty channel mapping has no rows but retains a stable table schema.
-    image_shape_zyx = channels[0][1].shape if channels else (0, 0, 0)
+    image_shape_zyx = resolved_channels[0][1].shape if resolved_channels else (0, 0, 0)
     coverages = (
         _initial_coverages(regions, image_shape_zyx)
-        if channels
+        if resolved_channels
         else [None] * cell_count
     )
-    plans = build_sampling_plans(regions, coverages) if channels else []
+    plans = build_sampling_plans(regions, coverages) if resolved_channels else []
 
     # Sampled volume depends only on geometry and is shared across channels.
     # Finite volume and statistical state are channel-specific because NaNs can
     # differ between otherwise aligned images.
     sampled_volume = np.zeros(cell_count, dtype=float)
-    nonfinite_omitted = np.zeros((len(channels), cell_count), dtype=bool)
+    nonfinite_omitted = np.zeros((len(resolved_channels), cell_count), dtype=bool)
     # Reducers are created lazily for regions that contribute an in-bounds
     # sample. Finalized scalar results live in fixed output slots, while the
     # potentially large exact-statistic buffers remain only in active reducers.
     active_reducers: list[dict[int, statistics.StreamingReducer]] = [
-        {} for _ in channels
+        {} for _ in resolved_channels
     ]
     finalized_metrics = [
         [_empty_statistics() for _ in regions.cells]
-        for _ in channels
+        for _ in resolved_channels
     ]
     finalized_mode_edges: list[list[list[float] | None]] = [
         [None for _ in regions.cells]
-        for _ in channels
+        for _ in resolved_channels
     ]
-    finite_volume = np.zeros((len(channels), cell_count), dtype=float)
+    finite_volume = np.zeros((len(resolved_channels), cell_count), dtype=float)
 
     # ULP-level arithmetic differences can change a histogram bin at an exact
     # edge. Mode requests therefore retain SciPy's reference interpolation;
     # other metrics use the specialized path for supported image dtypes/shapes.
     specialized_channels = [
         "mode" not in selected and interpolation.can_use_specialized_trilinear(image)
-        for _, image in channels
+        for _, image in resolved_channels
     ]
     specialized_channel_count = sum(specialized_channels)
 
@@ -322,7 +467,7 @@ def measure(
             # Interpolate one channel at a time so channel count does not
             # multiply coordinate/value scratch memory. The same span offsets
             # partition every channel's output without per-region mask scans.
-            for channel_index, (_, image) in enumerate(channels):
+            for channel_index, (_, image) in enumerate(resolved_channels):
                 use_specialized = specialized_channels[channel_index]
                 values = interpolation.interpolate_values(
                     image,
@@ -357,7 +502,7 @@ def measure(
         # Finalize after every channel has consumed the block, then release exact
         # quantile/mode buffers immediately.
         for region_index in block.completed_region_indices:
-            for channel_index in range(len(channels)):
+            for channel_index in range(len(resolved_channels)):
                 reducer = active_reducers[channel_index].pop(region_index, None)
                 if reducer is None:
                     continue
@@ -377,7 +522,7 @@ def measure(
     # Finalize every cell/channel explicitly so sparse IDs, invalid geometry,
     # and completely uncovered prisms remain represented in the table.
     rows = []
-    for channel_index, (channel_name, _) in enumerate(channels):
+    for channel_index, (channel_name, _) in enumerate(resolved_channels):
         for region_index, region in enumerate(regions.cells):
             coverage = coverages[region_index]
             requested_volume = (
@@ -452,6 +597,7 @@ def measure(
         "origin_zyx": list(regions.calibration.origin_zyx),
         "z_reflected": regions.z_reflected,
         "z_reflection_offset": regions.z_reflection_offset,
+        "channels": [channel_name for channel_name, _ in resolved_channels],
         "measurements": list(selected),
         "nonfinite_policy": "omit; finite_volume is the contributing denominator",
         "interpolation_support": "closed index box [0, size - 1]",

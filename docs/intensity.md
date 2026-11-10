@@ -25,6 +25,31 @@ intensity.plot_feature_map(result, values, channel="cytosol", feature="mean")
 values.save("intensity-results.npz")
 ```
 
+`measure` accepts three explicit stack forms. A ZYX array has one scalar label;
+a CZYX array has one label per source channel and is selected by zero-based
+source indices; a mapping uses its keys as labels and is selected by key. Naming
+and selection are independent, and selections preserve the requested order:
+
+```python
+gfp = intensity.measure(stack_zyx, regions, channel_names="GFP")
+subset = intensity.measure(
+    stack_czyx,
+    regions,
+    channel_names=["Junctions", "GFP", "Delta"],
+    channels=[2, 0],  # Delta, then Junctions
+)
+delta = intensity.measure(
+    {"GFP": gfp_zyx, "Delta": delta_zyx},
+    regions,
+    channels="Delta",
+)
+```
+
+For CZYX input, `channels` always refers to the original channel axis, even
+when custom names are supplied. Omit `channels` to measure all channels in
+source or mapping order. CZYX selection uses views rather than copying selected
+volumes.
+
 The default acquisition spacing is `(result.voxel_depth, result.pixel_size,
 result.pixel_size)`. For a cropped or resampled stack, pass
 `StackCalibration((dz, dy, dx), (z0, y0, x0))`; all values must use the result's

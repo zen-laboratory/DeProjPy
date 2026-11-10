@@ -34,7 +34,7 @@ def _synthetic_result():
 
 
 def _synthetic_channels(image_shape_yx):
-    """Return two small aligned stacks with known axis order ``(z, y, x)``."""
+    """Return one small channel-first stack with axis order ``(c, z, y, x)``."""
     z_index, y_index, x_index = np.indices((14, *image_shape_yx), dtype=float)
     affine = x_index + 0.5 * y_index + 2.0 * z_index
     spot = np.exp(
@@ -44,7 +44,7 @@ def _synthetic_channels(image_shape_yx):
             + (z_index - 10.0) ** 2 / 5.0
         )
     )
-    return {"affine": affine, "spot": spot}
+    return np.stack([affine, spot])
 
 
 def main(output_dir: str | Path = "examples/output/intensity"):
@@ -53,7 +53,7 @@ def main(output_dir: str | Path = "examples/output/intensity"):
     output_path.mkdir(parents=True, exist_ok=True)
 
     result, image_shape_yx = _synthetic_result()
-    channels = _synthetic_channels(image_shape_yx)
+    stack_czyx = _synthetic_channels(image_shape_yx)
     calibration = dp.intensity.StackCalibration(
         spacing_zyx=(1.0, 0.5, 0.5),
         origin_zyx=(0.0, 0.0, 0.0),
@@ -70,8 +70,10 @@ def main(output_dir: str | Path = "examples/output/intensity"):
         sampling_spacing=0.5,
     )
     measurements = dp.intensity.measure(
-        channels,
+        stack_czyx,
         regions,
+        channel_names=["affine", "spot"],
+        channels=[0, 1],
         measurements=("mean", "mode", "std", "sampled_volume"),
         mode_bins=np.linspace(0.0, 70.0, 15),
         max_batch_samples=2_000,

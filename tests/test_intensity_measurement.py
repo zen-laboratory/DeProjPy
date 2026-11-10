@@ -124,7 +124,12 @@ def test_measurement_agrees_across_batch_sizes_and_channels():
     )
     assert small.table["mode_bin_edges"].tolist() == large.table["mode_bin_edges"].tolist()
 
-    single = intensity.measure(first, regions, measurements="mean", channel="first")
+    single = intensity.measure(
+        first,
+        regions,
+        measurements="mean",
+        channel_names="first",
+    )
     mapped = intensity.measure({"first": first}, regions, measurements="mean")
     pd.testing.assert_frame_equal(single.table, mapped.table)
 

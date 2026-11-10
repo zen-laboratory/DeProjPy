@@ -124,7 +124,10 @@ regions = dp.intensity.prepare_regions(
     result, (-1, 5), depth_units="slices", tissue_side="increasing_z"
 )
 measured = dp.intensity.measure(
-    {"membrane": membrane_zyx, "cytosol": cytosol_zyx}, regions
+    stack_czyx,
+    regions,
+    channel_names=["membrane", "cytosol", "nuclei"],
+    channels=[1, 0],
 )
 ```
 
